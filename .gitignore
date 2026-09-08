@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+floorplans/*
+!floorplans/.gitkeep
+output/*
+!output/.gitkeep
+user_json/*
+!user_json/.gitkeep

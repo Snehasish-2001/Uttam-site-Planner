@@ -1,0 +1,394 @@
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --border: #dde1e6;
+  --text: #1f2430;
+  --text-muted: #667085;
+  --accent: #2f6f4f;
+  --accent-dark: #1f4d36;
+  --danger: #b3261e;
+  --danger-bg: #fdecea;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+}
+
+header {
+  padding: 28px 32px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+}
+
+header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+main {
+  max-width: 1080px;
+  margin: 24px auto 64px;
+  padding: 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+
+.card h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.card .hint {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+button.secondary:hover:not(:disabled) { background: #eef4f0; }
+
+input[type="file"] {
+  font-size: 13px;
+}
+
+.filename {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.status-log {
+  margin-top: 12px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: #f8f9fb;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}
+
+.status-log .error-line {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.status-log.empty { display: none; }
+
+.error-box {
+  margin-top: 12px;
+  background: var(--danger-bg);
+  border: 1px solid #f3c8c4;
+  color: var(--danger);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.error-box pre {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#viewerContainer {
+  margin-top: 14px;
+  height: 560px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #1b1e24;
+  position: relative;
+  overflow: hidden;
+}
+
+#viewerPlaceholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b93a3;
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 100px;
+  background: #fff4e0;
+  color: #9a6400;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.links {
+  margin-top: 12px;
+  display: flex;
+  gap: 14px;
+  font-size: 13.5px;
+}
+
+.links a {
+  color: var(--accent-dark);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.links a:hover { text-decoration: underline; }
+
+#pdfPreview {
+  margin-top: 14px;
+  width: 100%;
+  height: 640px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  display: none;
+}
+
+.step-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* --- uttam-5 wizard additions --- */
+
+.step-nav {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.step-pill {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 100px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-muted);
+}
+
+.step-pill.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.step-pill.todo {
+  color: #b7bcc6;
+  border-style: dashed;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+}
+
+.field label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.field input[type="text"],
+.field input[type="number"],
+.field textarea,
+.field select {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.ratio-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ratio-row input {
+  width: 70px;
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+table.edge-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+table.edge-table th {
+  text-align: left;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+table.edge-table td {
+  border-bottom: 1px solid #eef0f3;
+  padding: 6px 8px;
+}
+
+table.edge-table input,
+table.edge-table select {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  width: 100%;
+}
+
+
+.site-preview {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fbfcfd;
+}
+
+.site-preview svg { display: block; width: 100%; height: 420px; }
+
+.site-preview-large svg { height: 620px; }
+
+/* Higher specificity than .site-preview svg / .site-preview-large svg (ID beats class,
+   regardless of source order) - without this, the north indicator's own small SVG
+   inherits the main drawing's width:100%/height:620px sizing and stretches far outside
+   its intended little box. */
+#northIndicator svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.north-indicator {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 80px;
+  height: 80px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  pointer-events: none;
+}
+
+.legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.legend .swatch {
+  width: 16px;
+  height: 0;
+  border-top-width: 2px;
+  border-top-style: solid;
+  display: inline-block;
+}
+
+#closureNote.closure-error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.result-box {
+  margin-top: 12px;
+  background: #f0f7f2;
+  border: 1px solid #cfe6d8;
+  color: var(--accent-dark);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: 13px;
+}

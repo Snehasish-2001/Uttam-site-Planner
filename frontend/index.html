@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Uttam Site Planner - Guided Wizard</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <h1>Uttam Site Planner <span class="badge">Phase 1</span></h1>
+  <p>A guided, page-by-page wizard for a plot of any shape - rectangular, trapezoidal, or a concave/L-shaped site.</p>
+  <div class="step-nav">
+    <span class="step-pill active" data-step="2">2. Site plan</span>
+    <span class="step-pill todo" data-step="1">1. Project &amp; legal (not yet built)</span>
+    <span class="step-pill todo" data-step="3">3. Footprint (not yet built)</span>
+    <span class="step-pill todo" data-step="4">4. Floors &amp; rooms (not yet built)</span>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Site plot - metes and bounds</h2>
+    <p class="hint">
+      Describe the plot boundary the way an architect lays it out on site: walk the perimeter
+      giving each edge's length, then triangulate it with diagonals measured from corner A -
+      exactly how a real site is squared up with a tape measure, no angle-measuring tool
+      needed. With N sides fixed, a polygon needs exactly <strong>N-3</strong> diagonals from
+      A to fully determine its shape (a triangle needs none at all - 3 sides alone fully fix
+      it; a quadrilateral needs exactly 1; a pentagon needs 2).
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="unitSelect">Unit</label>
+        <select id="unitSelect">
+          <option value="ft" selected>Feet</option>
+          <option value="m">Meter</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="sidesCount">Number of sides</label>
+        <input type="number" id="sidesCount" min="3" max="20" value="4" />
+      </div>
+      <div class="checkbox-row" style="margin-top: 18px;">
+        <input type="checkbox" id="regularToggle" autocomplete="off" />
+        <label for="regularToggle">This is a regular polygon (all sides/angles equal)</label>
+      </div>
+    </div>
+    <p class="hint" id="regularNote" style="display:none;">
+      With a regular polygon, every side and diagonal is fixed by the number of sides alone -
+      changing one side length changes the polygon's overall size, not its shape, so the
+      other values are expected to stay in the same proportion while you edit lengths here.
+    </p>
+
+    <table class="edge-table">
+      <thead>
+        <tr>
+          <th style="width: 90px;">Edge</th>
+          <th id="lengthHeader">Length (ft)</th>
+          <th style="width: 140px;">Role</th>
+          <th id="setbackHeader" style="width: 110px;">Setback (ft)</th>
+          <th id="roadWidthHeader" style="width: 120px;">Road width (ft)</th>
+          <th style="width: 150px;">Neighbour name</th>
+          <th style="width: 110px;">Plot no.</th>
+        </tr>
+      </thead>
+      <tbody id="edgeRows"></tbody>
+    </table>
+
+    <div id="diagonalsSection" style="margin-top: 16px;">
+      <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals from corner A</h3>
+      <p class="hint" id="diagonalsNote"></p>
+      <table class="edge-table" id="diagonalsTable" style="display:none;">
+        <thead>
+          <tr>
+            <th style="width: 90px;">Diagonal</th>
+            <th id="diagonalLengthHeader">Length (ft)</th>
+          </tr>
+        </thead>
+        <tbody id="diagonalRows"></tbody>
+      </table>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="roadExtension" id="roadExtensionLabel">Road extension (ft, each side)</label>
+        <input type="number" id="roadExtension" min="0" step="1" value="15" />
+      </div>
+    </div>
+
+    <div class="site-preview">
+      <svg id="sitePreviewSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area (server-computed)</span>
+      <span><span class="swatch" style="border-color:#c0392b; border-top-style:dotted;"></span>Diagonal from corner A</span>
+      <span><span class="swatch" style="border-color:#8d949e; border-top-width:8px;"></span>Road (width as entered, extended with a break line)</span>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="computeBtn">Compute buildable area</button>
+      <span id="closureNote" class="hint" style="margin: 0;"></span>
+    </div>
+
+    <div id="areaSummary" class="result-box" style="display:none;"></div>
+
+    <div id="statusLog" class="status-log empty"></div>
+    <div id="errorBox" class="error-box" style="display:none;"></div>
+    <div id="resultBox" class="result-box" style="display:none;"></div>
+  </section>
+
+  <section class="card">
+    <h2>Final site plan</h2>
+    <p class="hint">
+      A clean presentation view of the site plan above - plot boundary, vertex labels, roads,
+      neighbours, and the diagonals used to construct it, without the buildable-area guide
+      line. North stays fixed; rotate the drawing itself until its true north lines up with
+      that fixed arrow, exactly like orienting a real site plan sheet.
+    </p>
+    <div class="row">
+      <button id="finaliseBtn">Finalise site plan</button>
+      <div class="field">
+        <label for="rotationInput">Rotate drawing (degrees)</label>
+        <input type="number" id="rotationInput" min="0" max="359" step="1" value="0" />
+      </div>
+    </div>
+    <div class="site-preview site-preview-large" style="position: relative;">
+      <svg id="finalSitePlanSvg" viewBox="-250 -250 1100 920" preserveAspectRatio="xMidYMid meet"></svg>
+      <div id="northIndicator" class="north-indicator">
+        <svg viewBox="0 0 80 80" width="80" height="80">
+          <line x1="40" y1="74" x2="40" y2="46" stroke="#1f2430" stroke-width="4" />
+          <polygon points="26,46 54,46 40,24" fill="#1f2430" />
+          <text x="40" y="18" font-size="20" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#1f2430">N</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Print sheet</h2>
+    <p class="hint">
+      Assemble the finalised site plan above into a printable sheet, the way a surveyor's
+      sketch map presents it: a header block, the mouza (cadastral) index map, and the site
+      plan drawing together on one page.
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="adminTypeSelect">Under</label>
+        <select id="adminTypeSelect">
+          <option value="Municipality" selected>Municipality</option>
+          <option value="Municipal Corporation">Municipal Corporation</option>
+          <option value="Panchayet">Panchayet</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adminNameInput" id="adminNameLabel">Municipality name</label>
+        <input type="text" id="adminNameInput" placeholder="e.g. Purulia" />
+      </div>
+      <div class="field">
+        <label for="wardNoInput">Ward No.</label>
+        <input type="text" id="wardNoInput" placeholder="e.g. 1" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="rsKhatianInput">R.S Khatian No.</label>
+        <input type="text" id="rsKhatianInput" placeholder="e.g. 191" />
+      </div>
+      <div class="field">
+        <label for="rsPlotInput">R.S Plot No.</label>
+        <input type="text" id="rsPlotInput" placeholder="e.g. 4718/P" />
+      </div>
+      <div class="field">
+        <label for="csPlotInput">C.S Plot No.</label>
+        <input type="text" id="csPlotInput" placeholder="e.g. 968/P" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label>Sketch map</label>
+        <div class="checkbox-row">
+          <input type="radio" name="sketchScaleMode" value="nts" id="sketchScaleNTS" />
+          <label for="sketchScaleNTS">Not to scale</label>
+          <input type="radio" name="sketchScaleMode" value="scale" id="sketchScaleToScale" checked style="margin-left: 10px;" />
+          <label for="sketchScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="sketchScaleRatioRow" style="display: flex;">
+          <input type="number" id="sketchScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="sketchScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Site plan</label>
+        <div class="checkbox-row">
+          <input type="radio" name="siteScaleMode" value="nts" id="siteScaleNTS" />
+          <label for="siteScaleNTS">Not to scale</label>
+          <input type="radio" name="siteScaleMode" value="scale" id="siteScaleToScale" checked style="margin-left: 10px;" />
+          <label for="siteScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="siteScaleRatioRow" style="display: flex;">
+          <input type="number" id="siteScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="siteScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Mouza map</label>
+        <div class="checkbox-row">
+          <input type="radio" name="mouzaScaleMode" value="nts" id="mouzaScaleNTS" />
+          <label for="mouzaScaleNTS">Not to scale</label>
+          <input type="radio" name="mouzaScaleMode" value="scale" id="mouzaScaleToScale" checked style="margin-left: 10px;" />
+          <label for="mouzaScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="mouzaScaleRatioRow" style="display: flex;">
+          <input type="number" id="mouzaScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="mouzaScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="surveyorNameInput">Surveyor name</label>
+        <input type="text" id="surveyorNameInput" placeholder="e.g. Bidyut Kumar Mahato" />
+      </div>
+      <div class="field">
+        <label for="surveyorRegdInput">Surveyor Regd. No.</label>
+        <input type="text" id="surveyorRegdInput" placeholder="e.g. 02711" />
+      </div>
+      <div class="field" style="flex: 1; min-width: 220px;">
+        <label for="drawnByInput">Drawn by (address)</label>
+        <input type="text" id="drawnByInput" placeholder="e.g. Kurmashol, Kuda, Kenda, Purulia" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field" style="flex: 1; min-width: 320px;">
+        <label for="additionalNotesInput">Additional notes (signatures, P.S./District, reference area, etc.)</label>
+        <textarea id="additionalNotesInput" rows="4" placeholder="P.S- ..., DIST- ...,&#10;REF. AREA- ... SQ.FT./... KATHA. ... CHH SHOWN IN"></textarea>
+      </div>
+      <div class="field">
+        <label for="mouzaMapInput">Mouza map image</label>
+        <input type="file" id="mouzaMapInput" accept="image/*" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="previewPdfBtn">Preview PDF</button>
+      <button id="downloadPdfBtn" disabled>Download PDF</button>
+      <span id="pdfNote" class="hint" style="margin: 0;"></span>
+    </div>
+
+    <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
+  </section>
+
+  <section class="card">
+    <h2>What's next</h2>
+    <p class="hint">
+      This page proves out the arbitrary-shape site-plot math end to end (the client-side
+      preview below is a live, pure-JS sketch of the boundary; "Compute buildable area" calls
+      the authoritative server-side <code>/compute-site</code> endpoint, which is what
+      actually gets stored). Pages 1, 3, and 4 - project/legal info, the building footprint,
+      and floors/rooms - are still being built.
+    </p>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
