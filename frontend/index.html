@@ -71,17 +71,19 @@
     </table>
 
     <div id="diagonalsSection" style="margin-top: 16px;">
-      <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals from corner A</h3>
+      <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals</h3>
       <p class="hint" id="diagonalsNote"></p>
       <table class="edge-table" id="diagonalsTable" style="display:none;">
         <thead>
           <tr>
-            <th style="width: 90px;">Diagonal</th>
+            <th style="width: 90px;">From</th>
+            <th style="width: 90px;">To</th>
             <th id="diagonalLengthHeader">Length (ft)</th>
           </tr>
         </thead>
         <tbody id="diagonalRows"></tbody>
       </table>
+      <button id="addDiagonalBtn" type="button" class="secondary" style="display:none; margin-top: 8px;">+ Add diagonal</button>
     </div>
 
     <div class="row" style="margin-top: 14px;">
@@ -97,7 +99,7 @@
     <div class="legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area (server-computed)</span>
-      <span><span class="swatch" style="border-color:#c0392b; border-top-style:dotted;"></span>Diagonal from corner A</span>
+      <span><span class="swatch" style="border-color:#c0392b; border-top-style:dotted;"></span>Diagonal</span>
       <span><span class="swatch" style="border-color:#8d949e; border-top-width:8px;"></span>Road (width as entered, extended with a break line)</span>
     </div>
 

@@ -192,6 +192,68 @@ function solveFromDiagonals(lengths, diagonals) {
   return { ok: true, vertices };
 }
 
+function solveFromDiagonalGraph(lengths, diagonalSpecs) {
+  // The general "chain triangulation" method surveyors actually use for large plots instead
+  // of always measuring back to corner A (which can be impractically far away): every
+  // diagonal can connect any two corners, not just A to something. This builds a full
+  // distance graph (every side, plus every diagonal given) and places one vertex at a time
+  // via circle-circle intersection, exactly like solveFromDiagonals() above, but picking
+  // whichever not-yet-placed vertex already has two already-placed neighbours (by side OR
+  // diagonal) rather than assuming a fixed fan-from-A order. Feeding it the old "every
+  // diagonal from A" shape produces the identical placement sequence as solveFromDiagonals(),
+  // so this is a strict generalisation, not a different algorithm.
+  const n = lengths.length;
+  const labels = labelsFor(n);
+  const dist = Array.from({ length: n }, () => ({}));
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    dist[i][j] = lengths[i];
+    dist[j][i] = lengths[i];
+  }
+  diagonalSpecs.forEach(({ from, to, length }) => {
+    if (from === to || validDiagonalTargets(n, from).has(to)) return; // ignore anything that's actually a side
+    if (!(to in dist[from])) dist[from][to] = length;
+    if (!(from in dist[to])) dist[to][from] = length;
+  });
+
+  const pts = new Array(n).fill(null);
+  pts[0] = { x: 0, y: 0 };
+  pts[1] = { x: lengths[0], y: 0 };
+  let placedCount = 2;
+  let progress = true;
+  while (placedCount < n && progress) {
+    progress = false;
+    for (let k = 0; k < n; k++) {
+      if (pts[k]) continue;
+      const knownNeighbours = Object.keys(dist[k]).map(Number).filter((j) => pts[j] !== null);
+      if (knownNeighbours.length < 2) continue;
+      const [i1, i2] = knownNeighbours;
+      const solutions = circleIntersections(pts[i1], dist[k][i1], pts[i2], dist[k][i2]);
+      if (solutions.length === 0) {
+        return {
+          ok: false,
+          error: `${labels[k]} doesn't fit: the distance from ${labels[i1]} (${dist[k][i1]} ft) and ` +
+            `from ${labels[i2]} (${dist[k][i2]} ft) can't both reach the same point. Adjust one of them.`,
+        };
+      }
+      pts[k] = pickOutward(pts.filter((p) => p !== null), solutions);
+      placedCount++;
+      progress = true;
+    }
+  }
+
+  if (placedCount < n) {
+    const missing = pts.map((p, i) => (p ? null : labels[i])).filter(Boolean);
+    return {
+      ok: false,
+      error: `Not enough diagonals to fully determine the shape - ${missing.join(", ")} ` +
+        `${missing.length === 1 ? "isn't" : "aren't"} pinned down yet. Add a diagonal connecting ` +
+        `one of them to two corners that are already fixed.`,
+    };
+  }
+  return { ok: true, vertices: pts };
+}
+
 const unitSelectEl = document.getElementById("unitSelect");
 const sidesCountEl = document.getElementById("sidesCount");
 const regularToggleEl = document.getElementById("regularToggle");
@@ -200,6 +262,7 @@ const edgeRowsEl = document.getElementById("edgeRows");
 const diagonalRowsEl = document.getElementById("diagonalRows");
 const diagonalsTableEl = document.getElementById("diagonalsTable");
 const diagonalsNoteEl = document.getElementById("diagonalsNote");
+const diagonalAddBtnEl = document.getElementById("addDiagonalBtn");
 const computeBtn = document.getElementById("computeBtn");
 const closureNoteEl = document.getElementById("closureNote");
 const svgEl = document.getElementById("sitePreviewSvg");
@@ -326,10 +389,35 @@ function readNeighbours() {
   };
 }
 
-function readDiagonals() {
-  return Array.from(diagonalRowsEl.querySelectorAll(".diagonal-input")).map(
-    (el) => displayToFeet(parseFloat(el.value) || 0)
-  );
+function readDiagonalSpecs() {
+  return Array.from(diagonalRowsEl.querySelectorAll("tr")).map((tr) => ({
+    from: parseInt(tr.querySelector(".diagonal-from-select").value, 10),
+    to: parseInt(tr.querySelector(".diagonal-to-select").value, 10),
+    length: displayToFeet(parseFloat(tr.querySelector(".diagonal-input").value) || 0),
+  }));
+}
+
+function validDiagonalTargets(n, fromIndex) {
+  // A diagonal can't connect a vertex to itself or to either of its own polygon neighbours -
+  // those are sides, not diagonals.
+  const prev = (fromIndex - 1 + n) % n;
+  const next = (fromIndex + 1) % n;
+  return new Set([fromIndex, prev, next]);
+}
+
+function populateDiagonalSelect(selectEl, n, labels, excludeSet) {
+  const previousValue = selectEl.value;
+  selectEl.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    if (excludeSet.has(i)) continue;
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = labels[i];
+    selectEl.appendChild(opt);
+  }
+  const stillValid = Array.from(selectEl.options).some((o) => o.value === previousValue);
+  if (stillValid) selectEl.value = previousValue;
+  else if (selectEl.options.length) selectEl.selectedIndex = 0;
 }
 
 function buildEdgeRows() {
@@ -456,13 +544,74 @@ function buildEdgeRows() {
   closureNoteEl.classList.remove("closure-error");
 }
 
-function buildDiagonalRows() {
+function diagonalSeedLength(fromIndex, toIndex) {
+  if (currentVertices && currentVertices[fromIndex] && currentVertices[toIndex]) {
+    const a = currentVertices[fromIndex], b = currentVertices[toIndex];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return displayToFeet(20);
+}
+
+function addDiagonalRow(defaultFrom, defaultTo) {
+  // defaultTo === null means "just pick the first valid target" - used by the Add Diagonal
+  // button, where there's no particular vertex the new row is expected to connect to.
   const n = currentSideCount();
   const labels = labelsFor(n);
+  const tr = document.createElement("tr");
+
+  const fromTd = document.createElement("td");
+  const fromSelect = document.createElement("select");
+  fromSelect.className = "diagonal-from-select";
+  populateDiagonalSelect(fromSelect, n, labels, new Set());
+  fromSelect.value = String(defaultFrom);
+  fromTd.appendChild(fromSelect);
+  tr.appendChild(fromTd);
+
+  const toTd = document.createElement("td");
+  const toSelect = document.createElement("select");
+  toSelect.className = "diagonal-to-select";
+  toTd.appendChild(toSelect);
+  tr.appendChild(toTd);
+  populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, defaultFrom));
+  if (defaultTo !== null && !validDiagonalTargets(n, defaultFrom).has(defaultTo)) {
+    toSelect.value = String(defaultTo);
+  }
+
+  const inputTd = document.createElement("td");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "0.01";
+  input.min = "0.01";
+  input.className = "diagonal-input";
+  input.value = feetToDisplay(diagonalSeedLength(parseInt(fromSelect.value, 10), parseInt(toSelect.value, 10))).toFixed(2);
+  inputTd.appendChild(input);
+  tr.appendChild(inputTd);
+
+  const reseed = () => {
+    input.value = feetToDisplay(diagonalSeedLength(parseInt(fromSelect.value, 10), parseInt(toSelect.value, 10))).toFixed(2);
+  };
+  fromSelect.addEventListener("change", () => {
+    populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, parseInt(fromSelect.value, 10)));
+    reseed();
+    onDiagonalChanged();
+  });
+  toSelect.addEventListener("change", () => {
+    reseed();
+    onDiagonalChanged();
+  });
+  input.addEventListener("input", onDiagonalChanged);
+  input.addEventListener("change", onDiagonalChanged);
+
+  diagonalRowsEl.appendChild(tr);
+}
+
+function buildDiagonalRows() {
+  const n = currentSideCount();
   diagonalRowsEl.innerHTML = "";
 
   if (regularToggleEl.checked) {
     diagonalsTableEl.style.display = "none";
+    diagonalAddBtnEl.style.display = "none";
     diagonalsNoteEl.textContent = "Not needed for a regular polygon - every diagonal follows automatically from the side length and vertex count.";
     return;
   }
@@ -470,37 +619,20 @@ function buildDiagonalRows() {
   const count = diagonalCount(n);
   if (count === 0) {
     diagonalsTableEl.style.display = "none";
+    diagonalAddBtnEl.style.display = "none";
     diagonalsNoteEl.textContent = "None needed - 3 sides alone fully determine a triangle.";
     return;
   }
 
-  diagonalsNoteEl.textContent = `${count} diagonal(s) needed from corner ${labels[0]} to fully determine this ${n}-sided shape - seeded below to match the shape currently shown.`;
+  diagonalsNoteEl.textContent =
+    `${count} diagonal(s) needed to fully determine this ${n}-sided shape - seeded below from ` +
+    `corner A, matching the shape currently shown. Change which corners a diagonal connects with ` +
+    `the dropdowns, or use "Add diagonal" for an extra one if that's easier to measure on site.`;
   diagonalsTableEl.style.display = "table";
+  diagonalAddBtnEl.style.display = "inline-block";
 
   for (let k = 2; k <= n - 2; k++) {
-    const tr = document.createElement("tr");
-    const labelTd = document.createElement("td");
-    labelTd.textContent = `${labels[0]}-${labels[k]}`;
-    tr.appendChild(labelTd);
-
-    const inputTd = document.createElement("td");
-    const input = document.createElement("input");
-    input.type = "number";
-    input.step = "0.01";
-    input.min = "0.01";
-    input.className = "diagonal-input";
-    input.dataset.vertexIndex = String(k);
-    const seedDist = Math.hypot(
-      currentVertices[k].x - currentVertices[0].x,
-      currentVertices[k].y - currentVertices[0].y
-    );
-    input.value = feetToDisplay(seedDist).toFixed(2);
-    input.addEventListener("input", onDiagonalChanged);
-    input.addEventListener("change", onDiagonalChanged);
-    inputTd.appendChild(input);
-    tr.appendChild(inputTd);
-
-    diagonalRowsEl.appendChild(tr);
+    addDiagonalRow(0, k);
   }
 }
 
@@ -517,8 +649,8 @@ function resolveAndRedraw() {
     return;
   }
 
-  const diagonals = readDiagonals();
-  const result = solveFromDiagonals(lengths, diagonals);
+  const diagonalSpecs = readDiagonalSpecs();
+  const result = solveFromDiagonalGraph(lengths, diagonalSpecs);
   if (!result.ok) {
     showError(result.error);
     closureNoteEl.textContent = "Could not solve a closed shape - see the message above.";
@@ -682,24 +814,28 @@ function buildPlotSvg(plotVertices, options) {
 
   svg += `<polygon points="${polygonPoints(transform, plotVertices)}" fill="none" stroke="#1f2430" stroke-width="2" />`;
 
-  // Diagonals from A, red dotted, only meaningful in non-regular mode.
+  // Diagonals, red dotted, only meaningful in non-regular mode - drawn from whatever pairs
+  // are actually configured in the diagonals table now (any corner to any corner), not
+  // assumed to always start from A.
   if (showDiagonals && !regularToggleEl.checked && plotVertices.length >= 4) {
-    const n = plotVertices.length;
-    const A = plotVertices[0];
-    const pA = transform(A);
-    for (let k = 2; k <= n - 2; k++) {
-      const Vk = plotVertices[k];
-      const pVk = transform(Vk);
-      const length = Math.hypot(Vk.x - A.x, Vk.y - A.y);
-      svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pVk.x.toFixed(1)}" y2="${pVk.y.toFixed(1)}" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="3,3" />`;
-      const mid = { x: (A.x + Vk.x) / 2, y: (A.y + Vk.y) / 2 };
+    Array.from(diagonalRowsEl.querySelectorAll("tr")).forEach((tr) => {
+      const fromSelect = tr.querySelector(".diagonal-from-select");
+      const toSelect = tr.querySelector(".diagonal-to-select");
+      if (!fromSelect || !toSelect) return;
+      const fi = parseInt(fromSelect.value, 10), ti = parseInt(toSelect.value, 10);
+      if (fi === ti || !(fi in plotVertices) || !(ti in plotVertices)) return;
+      const Vi = plotVertices[fi], Vj = plotVertices[ti];
+      const pVi = transform(Vi), pVj = transform(Vj);
+      const length = Math.hypot(Vj.x - Vi.x, Vj.y - Vi.y);
+      svg += `<line x1="${pVi.x.toFixed(1)}" y1="${pVi.y.toFixed(1)}" x2="${pVj.x.toFixed(1)}" y2="${pVj.y.toFixed(1)}" stroke="#c0392b" stroke-width="1.4" stroke-dasharray="3,3" />`;
+      const mid = { x: (Vi.x + Vj.x) / 2, y: (Vi.y + Vj.y) / 2 };
       const dx = mid.x - centroid.x, dy = mid.y - centroid.y;
       const dlen = Math.hypot(dx, dy) || 1;
       const labelPoint = { x: mid.x + (dx / dlen) * (nudge * 0.6), y: mid.y + (dy / dlen) * (nudge * 0.6) };
       const pLabel = transform(labelPoint);
       svg += `<text x="${pLabel.x.toFixed(1)}" y="${pLabel.y.toFixed(1)}" font-size="11.5" font-weight="600" ` +
         `fill="#c0392b" text-anchor="middle" dominant-baseline="middle">${feetToDisplay(length).toFixed(2)} ${unitLabel()}</text>`;
-    }
+    });
   }
 
   const rowsMatch = edgeRowsEl.children.length === plotVertices.length;
@@ -1775,6 +1911,10 @@ regularToggleEl.addEventListener("change", () => {
   }
 });
 computeBtn.addEventListener("click", computeSite);
+diagonalAddBtnEl.addEventListener("click", () => {
+  addDiagonalRow(0, null);
+  onDiagonalChanged();
+});
 
 updateUnitLabels();
 buildEdgeRows();
