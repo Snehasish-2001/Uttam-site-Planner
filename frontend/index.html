@@ -262,14 +262,72 @@
     <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
   </section>
 
+  <section class="card" id="footprintCard">
+    <h2>Building footprint</h2>
+    <p class="hint">
+      Draw the outer wall line of the building itself, sitting inside the buildable area
+      already computed above. Unlike the site plot, a building's walls are always square to
+      each other, so instead of diagonals, every corner is simply <strong>90&deg;</strong>
+      (a normal outward corner) or <strong>270&deg;</strong> (an inward notch, for an L, U, T,
+      or plus shape). A valid closed footprint always has exactly 4 more 90&deg; corners than
+      270&deg; corners.
+    </p>
+
+    <div class="site-preview">
+      <svg id="footprintSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area</span>
+      <span><span class="swatch" style="border-color:#1a5fb4;"></span>Building footprint</span>
+    </div>
+    <p class="hint" id="footprintPlaceholderNote">Compute the buildable area above first.</p>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="footprintSidesCount">Number of sides</label>
+        <input type="number" id="footprintSidesCount" min="4" max="20" step="2" value="4" />
+      </div>
+      <div class="field">
+        <label for="footprintStartX" id="footprintStartXLabel">Start X (ft)</label>
+        <input type="number" id="footprintStartX" step="any" class="footprint-start-input" />
+      </div>
+      <div class="field">
+        <label for="footprintStartY" id="footprintStartYLabel">Start Y (ft)</label>
+        <input type="number" id="footprintStartY" step="any" class="footprint-start-input" />
+      </div>
+    </div>
+    <p class="hint" id="footprintCornerNote"></p>
+
+    <table class="edge-table">
+      <thead>
+        <tr>
+          <th style="width: 90px;">Edge</th>
+          <th id="footprintLengthHeader">Length (ft)</th>
+          <th style="width: 220px;">Corner angle</th>
+        </tr>
+      </thead>
+      <tbody id="footprintRows"></tbody>
+    </table>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="footprintPreviewBtn" disabled>Preview footprint</button>
+      <span id="footprintStatusNote" class="hint" style="margin: 0;"></span>
+    </div>
+
+    <div id="footprintAreaSummary" class="result-box" style="display:none;"></div>
+    <div id="footprintErrorBox" class="error-box" style="display:none;"></div>
+  </section>
+
   <section class="card">
     <h2>What's next</h2>
     <p class="hint">
       This page proves out the arbitrary-shape site-plot math end to end (the client-side
       preview below is a live, pure-JS sketch of the boundary; "Compute buildable area" calls
       the authoritative server-side <code>/compute-site</code> endpoint, which is what
-      actually gets stored). Pages 1, 3, and 4 - project/legal info, the building footprint,
-      and floors/rooms - are still being built.
+      actually gets stored), plus a first pass at the building footprint above using the same
+      metes-and-bounds idea with square (90&deg;/270&deg;) corners. Project/legal info and
+      floors/rooms are still being built.
     </p>
   </section>
 </main>

@@ -37,11 +37,17 @@ function updateUnitLabels() {
   const roadWidthHeader = document.getElementById("roadWidthHeader");
   const diagonalLengthHeader = document.getElementById("diagonalLengthHeader");
   const roadExtensionLabel = document.getElementById("roadExtensionLabel");
+  const footprintLengthHeader = document.getElementById("footprintLengthHeader");
+  const footprintStartXLabel = document.getElementById("footprintStartXLabel");
+  const footprintStartYLabel = document.getElementById("footprintStartYLabel");
   if (lengthHeader) lengthHeader.textContent = `Length (${u})`;
   if (setbackHeader) setbackHeader.textContent = `Setback (${u})`;
   if (roadWidthHeader) roadWidthHeader.textContent = `Road width (${u})`;
   if (diagonalLengthHeader) diagonalLengthHeader.textContent = `Length (${u})`;
   if (roadExtensionLabel) roadExtensionLabel.textContent = `Road extension (${u}, each side)`;
+  if (footprintLengthHeader) footprintLengthHeader.textContent = `Length (${u})`;
+  if (footprintStartXLabel) footprintStartXLabel.textContent = `Start X (${u})`;
+  if (footprintStartYLabel) footprintStartYLabel.textContent = `Start Y (${u})`;
 }
 
 function labelsFor(n) {
@@ -237,11 +243,24 @@ const previewPdfBtn = document.getElementById("previewPdfBtn");
 const downloadPdfBtn = document.getElementById("downloadPdfBtn");
 const pdfNoteEl = document.getElementById("pdfNote");
 const pdfPreviewFrameEl = document.getElementById("pdfPreviewFrame");
+const footprintSvgEl = document.getElementById("footprintSvg");
+const footprintPlaceholderNoteEl = document.getElementById("footprintPlaceholderNote");
+const footprintSidesCountEl = document.getElementById("footprintSidesCount");
+const footprintStartXEl = document.getElementById("footprintStartX");
+const footprintStartYEl = document.getElementById("footprintStartY");
+const footprintCornerNoteEl = document.getElementById("footprintCornerNote");
+const footprintRowsEl = document.getElementById("footprintRows");
+const footprintPreviewBtn = document.getElementById("footprintPreviewBtn");
+const footprintStatusNoteEl = document.getElementById("footprintStatusNote");
+const footprintAreaSummaryEl = document.getElementById("footprintAreaSummary");
+const footprintErrorBoxEl = document.getElementById("footprintErrorBox");
 
 let mouzaMapDataUrl = null;
 let lastPdfDoc = null;
 
 let lastBuildable = null;   // stashed for page 3 (footprint) to reuse later
+let footprintDefaultsInitialized = false;
+let lastFootprintVertices = null;
 let currentVertices = null; // the last successfully resolved plot polygon (local coords)
 let lastBuildableAreaSqft = null;
 
@@ -1070,6 +1089,8 @@ async function computeSite() {
     lastBuildable = data.buildable.vertices;
     lastBuildableAreaSqft = polygonArea(lastBuildable);
     drawPreview(data.plot.vertices, lastBuildable);
+    initFootprintDefaults();
+    drawFootprintPreview();
 
     let msg = `Buildable area computed (${data.buildable.vertices.length} vertices).`;
     if (data.adjusted) msg += ` Closure auto-corrected (${data.closure_error_ft} ft error).`;
@@ -1084,6 +1105,254 @@ async function computeSite() {
     computeBtn.disabled = false;
   }
 }
+
+// ---- Building footprint (reuses lastBuildable/currentVertices from the site plot above) ----
+
+function footprintSideCount() {
+  return parseInt(footprintSidesCountEl.value, 10) || 4;
+}
+
+function pointInPolygon(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersect = (yi > pt.y) !== (yj > pt.y) &&
+      pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function computeDefaultFootprint(buildableVertices) {
+  // A best-effort default rectangle that sits inside the buildable polygon - shrinks from
+  // 60% of the bounding box down until every corner actually falls inside (handles narrow
+  // or concave buildable areas), falling back to a small square at the centroid.
+  const xs = buildableVertices.map((v) => v.x), ys = buildableVertices.map((v) => v.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const fullW = maxX - minX, fullH = maxY - minY;
+  for (let scale = 0.6; scale > 0.1; scale -= 0.05) {
+    const w = fullW * scale, h = fullH * scale;
+    const corners = [
+      { x: cx - w / 2, y: cy - h / 2 },
+      { x: cx + w / 2, y: cy - h / 2 },
+      { x: cx + w / 2, y: cy + h / 2 },
+      { x: cx - w / 2, y: cy + h / 2 },
+    ];
+    if (corners.every((c) => pointInPolygon(c, buildableVertices))) {
+      return { startX: cx - w / 2, startY: cy - h / 2, width: w, height: h };
+    }
+  }
+  const c = centroidOf(buildableVertices);
+  return { startX: c.x - 5, startY: c.y - 5, width: 10, height: 10 };
+}
+
+function requiredCornerCounts(n) {
+  return { convex: (n + 4) / 2, concave: (n - 4) / 2 };
+}
+
+function readFootprintAngles() {
+  const n = footprintRowsEl.children.length;
+  const angles = [];
+  for (let i = 0; i < n; i++) {
+    const checked = footprintRowsEl.querySelector(`input[name="footprintAngle${i}"]:checked`);
+    angles.push(checked ? parseFloat(checked.value) : 90);
+  }
+  return angles;
+}
+
+function readFootprintLengths() {
+  return Array.from(footprintRowsEl.querySelectorAll(".footprint-length-input"))
+    .map((el) => displayToFeet(parseFloat(el.value) || 0));
+}
+
+function updateFootprintCornerNote() {
+  const n = footprintSideCount();
+  if (n % 2 !== 0 || n < 4) {
+    footprintCornerNoteEl.textContent = `Footprint needs an even number of sides, 4 or more (got ${n}).`;
+    footprintCornerNoteEl.classList.add("closure-error");
+    return false;
+  }
+  const { convex, concave } = requiredCornerCounts(n);
+  const angles = readFootprintAngles();
+  const actualConvex = angles.filter((a) => a === 90).length;
+  const actualConcave = angles.filter((a) => a === 270).length;
+  const ok = actualConvex === convex && actualConcave === concave;
+  footprintCornerNoteEl.textContent =
+    `Corners needed for a closed ${n}-sided footprint: ${convex} × 90°, ${concave} × 270°. ` +
+    `Currently set: ${actualConvex} × 90°, ${actualConcave} × 270°.`;
+  footprintCornerNoteEl.classList.toggle("closure-error", !ok);
+  return ok;
+}
+
+function buildFootprintRows(seed) {
+  const n = footprintSideCount();
+  const labels = labelsFor(n);
+  footprintRowsEl.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const defaultLen = seed && seed.lengths ? seed.lengths[i] : displayToFeet(10);
+    const defaultAngle = seed && seed.angles ? seed.angles[i] : 90;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${labels[i]} → ${labels[(i + 1) % n]}</td>` +
+      `<td><input type="number" class="footprint-length-input" min="0.1" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>` +
+      `<td><div class="checkbox-row">` +
+      `<input type="radio" name="footprintAngle${i}" value="90" id="footprintAngle${i}_90" ${defaultAngle === 90 ? "checked" : ""} />` +
+      `<label for="footprintAngle${i}_90">90&deg;</label>` +
+      `<input type="radio" name="footprintAngle${i}" value="270" id="footprintAngle${i}_270" style="margin-left:10px;" ${defaultAngle === 270 ? "checked" : ""} />` +
+      `<label for="footprintAngle${i}_270">270&deg;</label>` +
+      `</div></td>`;
+    footprintRowsEl.appendChild(tr);
+  }
+  footprintRowsEl.querySelectorAll('input[type="radio"]').forEach((el) => {
+    el.addEventListener("change", updateFootprintCornerNote);
+  });
+  updateFootprintCornerNote();
+}
+
+function initFootprintDefaults() {
+  if (!lastBuildable || footprintDefaultsInitialized) return;
+  footprintDefaultsInitialized = true;
+  footprintPlaceholderNoteEl.style.display = "none";
+  footprintPreviewBtn.disabled = false;
+  const d = computeDefaultFootprint(lastBuildable);
+  footprintSidesCountEl.value = 4;
+  footprintStartXEl.value = feetToDisplay(d.startX).toFixed(2);
+  footprintStartYEl.value = feetToDisplay(d.startY).toFixed(2);
+  buildFootprintRows({ lengths: [d.width, d.height, d.width, d.height], angles: [90, 90, 90, 90] });
+}
+
+function drawFootprintPreview() {
+  if (!currentVertices) return;
+  const boundsSource = currentVertices.concat(lastFootprintVertices || []);
+  const transform = svgTransformFor(boundsSource);
+  let svg = `<polygon points="${polygonPoints(transform, currentVertices)}" fill="none" stroke="#1f2430" stroke-width="2" />`;
+  if (lastBuildable && lastBuildable.length >= 3) {
+    svg += `<polygon points="${polygonPoints(transform, lastBuildable)}" fill="none" stroke="#999999" stroke-width="1.5" stroke-dasharray="6,4" />`;
+  }
+  if (lastFootprintVertices && lastFootprintVertices.length >= 3) {
+    const n = lastFootprintVertices.length;
+    const labels = labelsFor(n);
+    const centroid = centroidOf(lastFootprintVertices);
+    svg += `<polygon points="${polygonPoints(transform, lastFootprintVertices)}" fill="rgba(26,95,180,0.08)" stroke="#1a5fb4" stroke-width="2" />`;
+    lastFootprintVertices.forEach((v, i) => {
+      const next = lastFootprintVertices[(i + 1) % n];
+      const length = Math.hypot(next.x - v.x, next.y - v.y);
+      const mid = { x: (v.x + next.x) / 2, y: (v.y + next.y) / 2 };
+      const dx = mid.x - centroid.x, dy = mid.y - centroid.y;
+      const dlen = Math.hypot(dx, dy) || 1;
+      const insidePoint = { x: mid.x - (dx / dlen) * 12, y: mid.y - (dy / dlen) * 12 };
+      const pInside = transform(insidePoint);
+      svg += `<text x="${pInside.x.toFixed(1)}" y="${pInside.y.toFixed(1)}" font-size="10.5" font-weight="600" ` +
+        `fill="#1a5fb4" text-anchor="middle" dominant-baseline="middle">${feetToDisplay(length).toFixed(2)} ${unitLabel()}</text>`;
+      const p = transform(v);
+      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#1a5fb4" />`;
+      svg += `<text x="${(p.x + 8).toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="12" font-weight="700" fill="#1a5fb4">${labels[i]}</text>`;
+    });
+  }
+  footprintSvgEl.innerHTML = svg;
+}
+
+function clearFootprintError() {
+  footprintErrorBoxEl.style.display = "none";
+  footprintErrorBoxEl.textContent = "";
+}
+
+function showFootprintError(msg) {
+  footprintErrorBoxEl.style.display = "block";
+  footprintErrorBoxEl.textContent = msg;
+}
+
+async function previewFootprint() {
+  clearFootprintError();
+  footprintAreaSummaryEl.style.display = "none";
+  if (!lastBuildable) {
+    showFootprintError("Compute the buildable area above first.");
+    return;
+  }
+  const n = footprintSideCount();
+  if (n % 2 !== 0 || n < 4) {
+    showFootprintError(`Number of sides must be even and at least 4 (got ${n}).`);
+    return;
+  }
+  if (!updateFootprintCornerNote()) {
+    showFootprintError("Corner angle counts don't add up to a closed shape yet - see the note above the table.");
+    return;
+  }
+  const lengths = readFootprintLengths();
+  if (lengths.some((l) => !l || l <= 0)) {
+    showFootprintError("Every side needs a length greater than zero.");
+    return;
+  }
+  const allAngles = readFootprintAngles();
+  // Vertex A's angle is derived server-side, matching /compute-site's own convention
+  // (computeSite() above does the same actualAngles.slice(1)).
+  const interiorAngles = allAngles.slice(1);
+
+  const body = {
+    lengths,
+    regular: false,
+    interior_angles: interiorAngles,
+    start: {
+      x: displayToFeet(parseFloat(footprintStartXEl.value) || 0),
+      y: displayToFeet(parseFloat(footprintStartYEl.value) || 0),
+    },
+    start_heading_deg: 0,
+    buildable: { vertices: lastBuildable },
+  };
+
+  footprintPreviewBtn.disabled = true;
+  footprintStatusNoteEl.textContent = "Validating...";
+  try {
+    const res = await fetch("/compute-footprint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.success) {
+      showFootprintError(`[${data.stage || "error"}] ${data.error}`);
+      footprintStatusNoteEl.textContent = "";
+      return;
+    }
+
+    lastFootprintVertices = data.footprint.vertices;
+    drawFootprintPreview();
+    footprintStatusNoteEl.textContent = data.adjusted
+      ? `Closure auto-corrected (${data.closure_error_ft} ft error).`
+      : "Shape closed exactly.";
+
+    const footprintAreaSqft = polygonArea(lastFootprintVertices);
+    const au = areaUnitLabel();
+    let areaMsg = `<strong>Footprint area:</strong> ${sqFeetToDisplayArea(footprintAreaSqft).toFixed(1)} ${au} ` +
+      `(${kathaChatakText(footprintAreaSqft)})<br/>`;
+    if (data.contained) {
+      areaMsg += `<span style="color: var(--accent-dark); font-weight:700;">Fits entirely within the buildable area.</span>`;
+    } else {
+      areaMsg += `<span style="color: var(--danger); font-weight:700;">Extends outside the buildable area by ~` +
+        `${sqFeetToDisplayArea(data.violation_area_sqft).toFixed(1)} ${au}. Adjust the shape or start position.</span>`;
+    }
+    footprintAreaSummaryEl.innerHTML = areaMsg;
+    footprintAreaSummaryEl.style.display = "block";
+  } catch (err) {
+    showFootprintError(`Network/parse error: ${err}`);
+    footprintStatusNoteEl.textContent = "";
+  } finally {
+    footprintPreviewBtn.disabled = false;
+  }
+}
+
+footprintSidesCountEl.addEventListener("change", () => {
+  let n = footprintSideCount();
+  if (n < 4) n = 4;
+  if (n % 2 !== 0) n += 1;
+  footprintSidesCountEl.value = n;
+  buildFootprintRows();
+  drawFootprintPreview();
+});
+footprintPreviewBtn.addEventListener("click", previewFootprint);
 
 unitSelectEl.addEventListener("change", () => {
   const oldUnit = currentUnit;
@@ -1100,10 +1369,11 @@ unitSelectEl.addEventListener("change", () => {
     const v = parseFloat(el.value);
     if (!isNaN(v)) el.value = (v * factor).toFixed(2);
   };
-  document.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input").forEach(convert);
+  document.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input, .footprint-length-input, .footprint-start-input").forEach(convert);
   convert(roadExtensionEl);
 
   resolveAndRedraw();
+  drawFootprintPreview();
 });
 
 sidesCountEl.addEventListener("change", buildEdgeRows);
