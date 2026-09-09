@@ -254,6 +254,15 @@ const footprintPreviewBtn = document.getElementById("footprintPreviewBtn");
 const footprintStatusNoteEl = document.getElementById("footprintStatusNote");
 const footprintAreaSummaryEl = document.getElementById("footprintAreaSummary");
 const footprintErrorBoxEl = document.getElementById("footprintErrorBox");
+const changeShapeBtn = document.getElementById("changeShapeBtn");
+const changeShapeFieldEl = document.getElementById("changeShapeField");
+const footprintIrregularToggleEl = document.getElementById("footprintIrregularToggle");
+const footprintRectilinearGroupEl = document.getElementById("footprintRectilinearGroup");
+const footprintIrregularGroupEl = document.getElementById("footprintIrregularGroup");
+const footprintIrregularRowsEl = document.getElementById("footprintIrregularRows");
+const footprintDiagonalsNoteEl = document.getElementById("footprintDiagonalsNote");
+const footprintDiagonalsTableEl = document.getElementById("footprintDiagonalsTable");
+const footprintDiagonalRowsEl = document.getElementById("footprintDiagonalRows");
 
 let mouzaMapDataUrl = null;
 let lastPdfDoc = null;
@@ -261,6 +270,9 @@ let lastPdfDoc = null;
 let lastBuildable = null;   // stashed for page 3 (footprint) to reuse later
 let footprintDefaultsInitialized = false;
 let lastFootprintVertices = null;
+let lastFootprintGapWalk = null;
+let footprintOrientation = 0;    // which of the 4 corner-rotations of the current template is showing
+let footprintCurrentAngles = []; // the template's own angle values - not user-editable anymore
 let currentVertices = null; // the last successfully resolved plot polygon (local coords)
 let lastBuildableAreaSqft = null;
 
@@ -1124,29 +1136,153 @@ function pointInPolygon(pt, poly) {
   return inside;
 }
 
-function computeDefaultFootprint(buildableVertices) {
-  // A best-effort default rectangle that sits inside the buildable polygon - shrinks from
-  // 60% of the bounding box down until every corner actually falls inside (handles narrow
-  // or concave buildable areas), falling back to a small square at the centroid.
+function buildNotchedRectangle(w, h, cornerFlags, cornerNotchFrac, midEdgeFlags, midNotchFrac, midDepthFrac) {
+  // The one generator behind every template shape. cornerFlags/midEdgeFlags are each
+  // [bottom-edge-or-corner, right, top, left] booleans (corner index c sits between edge
+  // c-1 and edge c, in the same CCW order as the edges).
+  //   - A flagged CORNER replaces that single vertex with a 3-point inward step (+2 net
+  //     vertices) - this alone makes an L (1 corner), a T or Z (2 corners, adjacent or
+  //     opposite), or a plus (all 4 corners).
+  //   - A flagged EDGE inserts an isolated notch in the middle of that edge, touching
+  //     neither of its corners (+4 net vertices, 2 of them concave) - this is the real
+  //     U-shape: a slot cut into one side, not a corner cut at all.
+  //   - Both kinds compose freely (e.g. one corner notch + one mid-edge notch on a
+  //     different, non-adjacent edge), which is what makes the 10-sided combinations work.
+  const corners = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+  const nx = w * cornerNotchFrac, ny = h * cornerNotchFrac;
+  const cornerDetour = (c) => {
+    if (c === 0) return [{ x: 0, y: ny }, { x: nx, y: ny }, { x: nx, y: 0 }];
+    if (c === 1) return [{ x: w - nx, y: 0 }, { x: w - nx, y: ny }, { x: w, y: ny }];
+    if (c === 2) return [{ x: w, y: h - ny }, { x: w - nx, y: h - ny }, { x: w - nx, y: h }];
+    return [{ x: nx, y: h }, { x: nx, y: h - ny }, { x: 0, y: h - ny }];
+  };
+  // Where an edge actually starts/ends once its bounding corner's own notch (if any) is
+  // accounted for - NOT the raw corner position. Without this, a mid-edge notch placed on
+  // an edge whose corner is ALSO notched would measure from the wrong point and could
+  // overlap or cross the corner notch - this is what lets corner- and edge-notches combine
+  // freely on the higher side counts instead of only on carefully-chosen "safe" edges.
+  const edgeStart = (c) => (cornerFlags[c] ? cornerDetour(c)[cornerDetour(c).length - 1] : corners[c]);
+  const edgeEnd = (c) => (cornerFlags[c] ? cornerDetour(c)[0] : corners[c]);
+  const pts = [];
+  for (let e = 0; e < 4; e++) {
+    if (cornerFlags[e]) pts.push(...cornerDetour(e));
+    else pts.push(corners[e]);
+    if (midEdgeFlags[e]) {
+      const from = edgeStart(e), to = edgeEnd((e + 1) % 4);
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const len = Math.hypot(dx, dy);
+      const ux = dx / len, uy = dy / len;
+      const inX = -uy, inY = ux; // 90deg CCW rotation of the edge direction = inward, for a CCW polygon
+      const nw = len * midNotchFrac;
+      const depth = (e % 2 === 0 ? h : w) * midDepthFrac;
+      const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+      const n1 = { x: mid.x - ux * (nw / 2), y: mid.y - uy * (nw / 2) };
+      const n2 = { x: n1.x + inX * depth, y: n1.y + inY * depth };
+      const n3 = { x: n2.x + ux * nw, y: n2.y + uy * nw };
+      const n4 = { x: n3.x - inX * depth, y: n3.y - inY * depth };
+      pts.push(n1, n2, n3, n4);
+    }
+  }
+  return pts;
+}
+
+function popcount4(mask) {
+  return ((mask & 1) ? 1 : 0) + ((mask & 2) ? 1 : 0) + ((mask & 4) ? 1 : 0) + ((mask & 8) ? 1 : 0);
+}
+
+function maskToFlags(mask) {
+  return [0, 1, 2, 3].map((i) => !!(mask & (1 << i)));
+}
+
+function footprintTemplateVariants(n) {
+  // Every distinct, realizable arrangement of corner-notches and mid-edge-notches for this
+  // side count - a full enumeration (every subset of the 4 corners paired with every subset
+  // of the 4 edges that together add up to the required concave-vertex count), not a
+  // hand-picked pattern rotated around. A corner contributes 1 concave vertex (+2 total
+  // vertices, a 3-point inward step); a mid-edge notch contributes 2 concave vertices (+4
+  // total vertices, an isolated slot touching neither of that edge's corners) - so
+  // corners.length + 2*edges.length must equal k. "Change shape" cycles through this whole
+  // list, in order, so every combination is genuinely reachable.
+  const k = (n - 4) / 2;
+  if (!Number.isInteger(k) || k < 0) return null;
+  const variants = [];
+  for (let cMask = 0; cMask < 16; cMask++) {
+    const cCount = popcount4(cMask);
+    if (cCount > k) continue;
+    const remaining = k - cCount;
+    if (remaining % 2 !== 0) continue;
+    const eCount = remaining / 2;
+    if (eCount > 4) continue;
+    for (let eMask = 0; eMask < 16; eMask++) {
+      if (popcount4(eMask) !== eCount) continue;
+      variants.push({
+        corners: maskToFlags(cMask),
+        cornerFrac: 0.3,
+        mid: maskToFlags(eMask),
+        midFrac: 0.35,
+        midDepth: 0.22,
+        square: cCount === 4 && eCount === 0, // the pure plus/cross needs a square box to come out symmetric
+      });
+    }
+  }
+  return variants.length > 0 ? variants : null; // k > 12 isn't reachable with only 4 corners/4 edges
+}
+
+function computeDefaultFootprintVertices(n, buildableVertices, orientation) {
+  // A best-effort default shape that sits inside the buildable polygon - shrinks from 60% of
+  // the bounding box down until every vertex actually falls inside (handles narrow or concave
+  // buildable areas), falling back to a small square at the centroid.
   const xs = buildableVertices.map((v) => v.x), ys = buildableVertices.map((v) => v.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const fullW = maxX - minX, fullH = maxY - minY;
-  for (let scale = 0.6; scale > 0.1; scale -= 0.05) {
-    const w = fullW * scale, h = fullH * scale;
-    const corners = [
-      { x: cx - w / 2, y: cy - h / 2 },
-      { x: cx + w / 2, y: cy - h / 2 },
-      { x: cx + w / 2, y: cy + h / 2 },
-      { x: cx - w / 2, y: cy + h / 2 },
-    ];
-    if (corners.every((c) => pointInPolygon(c, buildableVertices))) {
-      return { startX: cx - w / 2, startY: cy - h / 2, width: w, height: h };
+  const variants = footprintTemplateVariants(n);
+  if (!variants) return null; // more sides than these families cover (n > 12) - no template available
+  const template = variants[((orientation || 0) % variants.length + variants.length) % variants.length];
+
+  for (let scale = 0.6; scale > 0.08; scale -= 0.04) {
+    let w = fullW * scale, h = fullH * scale;
+    if (template.square) { const s = Math.min(w, h); w = s; h = s; }
+    const local = buildNotchedRectangle(w, h, template.corners, template.cornerFrac, template.mid, template.midFrac, template.midDepth);
+    const originX = cx - w / 2, originY = cy - h / 2;
+    const abs = local.map((p) => ({ x: p.x + originX, y: p.y + originY }));
+    if (abs.every((v) => pointInPolygon(v, buildableVertices))) {
+      return abs;
     }
   }
   const c = centroidOf(buildableVertices);
-  return { startX: c.x - 5, startY: c.y - 5, width: 10, height: 10 };
+  return [
+    { x: c.x - 5, y: c.y - 5 }, { x: c.x + 5, y: c.y - 5 },
+    { x: c.x + 5, y: c.y + 5 }, { x: c.x - 5, y: c.y + 5 },
+  ];
+}
+
+function footprintVariantCount(n) {
+  const variants = footprintTemplateVariants(n);
+  return variants ? variants.length : 0;
+}
+
+function walkOpenPolygon(lengths, interiorAngles, start, startHeadingDeg) {
+  // Same turtle walk as the server's vertices_from_edges(), but WITHOUT the compass-rule
+  // closure correction - used only to visualize where a non-closing shape actually ends up,
+  // matching what the server just rejected.
+  const n = lengths.length;
+  const exteriorSumKnown = interiorAngles.reduce((s, a) => s + (180 - a), 0);
+  const exteriorLast = 360 - exteriorSumKnown;
+  const interiorLast = 180 - exteriorLast;
+  const allInterior = interiorAngles.concat([interiorLast]);
+
+  const pts = [{ x: start.x, y: start.y }];
+  let heading = startHeadingDeg;
+  let x = start.x, y = start.y;
+  for (let i = 0; i < n; i++) {
+    x += lengths[i] * Math.cos((heading * Math.PI) / 180);
+    y += lengths[i] * Math.sin((heading * Math.PI) / 180);
+    pts.push({ x, y });
+    if (i < n - 1) heading += 180 - allInterior[i];
+  }
+  return pts; // n+1 points: pts[0..n-1] are the placed vertices, pts[n] is where it actually ends up
 }
 
 function requiredCornerCounts(n) {
@@ -1154,13 +1290,10 @@ function requiredCornerCounts(n) {
 }
 
 function readFootprintAngles() {
-  const n = footprintRowsEl.children.length;
-  const angles = [];
-  for (let i = 0; i < n; i++) {
-    const checked = footprintRowsEl.querySelector(`input[name="footprintAngle${i}"]:checked`);
-    angles.push(checked ? parseFloat(checked.value) : 90);
-  }
-  return angles;
+  // Corner angles now come from the current template + orientation (see "Change shape"),
+  // not from per-row controls - hand-tuning 90/270 per vertex almost never produces a shape
+  // that actually closes, so there's nothing useful left to toggle here.
+  return footprintCurrentAngles;
 }
 
 function readFootprintLengths() {
@@ -1190,26 +1323,133 @@ function updateFootprintCornerNote() {
 function buildFootprintRows(seed) {
   const n = footprintSideCount();
   const labels = labelsFor(n);
+  footprintCurrentAngles = seed && seed.angles ? seed.angles : new Array(n).fill(90);
   footprintRowsEl.innerHTML = "";
   for (let i = 0; i < n; i++) {
     const defaultLen = seed && seed.lengths ? seed.lengths[i] : displayToFeet(10);
-    const defaultAngle = seed && seed.angles ? seed.angles[i] : 90;
+    const angle = footprintCurrentAngles[i];
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td><strong>${labels[i]}</strong></td>` +
+      `<td>${angle}&deg;${angle === 270 ? " (notch)" : ""}</td>` +
+      `<td>${labels[i]} → ${labels[(i + 1) % n]}</td>` +
+      `<td><input type="number" class="footprint-length-input" min="0.1" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>`;
+    footprintRowsEl.appendChild(tr);
+  }
+  updateFootprintCornerNote();
+}
+
+function readFootprintIrregularLengths() {
+  return Array.from(footprintIrregularRowsEl.querySelectorAll(".footprint-irregular-length-input"))
+    .map((el) => displayToFeet(parseFloat(el.value) || 0));
+}
+
+function readFootprintDiagonalsList() {
+  return Array.from(footprintDiagonalRowsEl.querySelectorAll(".footprint-diagonal-input"))
+    .map((el) => displayToFeet(parseFloat(el.value) || 0));
+}
+
+function buildFootprintIrregularRows(seed) {
+  const n = footprintSideCount();
+  const labels = labelsFor(n);
+  footprintIrregularRowsEl.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const defaultLen = seed && seed.lengths ? seed.lengths[i] : displayToFeet(10);
     const tr = document.createElement("tr");
     tr.innerHTML =
       `<td>${labels[i]} → ${labels[(i + 1) % n]}</td>` +
-      `<td><input type="number" class="footprint-length-input" min="0.1" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>` +
-      `<td><div class="checkbox-row">` +
-      `<input type="radio" name="footprintAngle${i}" value="90" id="footprintAngle${i}_90" ${defaultAngle === 90 ? "checked" : ""} />` +
-      `<label for="footprintAngle${i}_90">90&deg;</label>` +
-      `<input type="radio" name="footprintAngle${i}" value="270" id="footprintAngle${i}_270" style="margin-left:10px;" ${defaultAngle === 270 ? "checked" : ""} />` +
-      `<label for="footprintAngle${i}_270">270&deg;</label>` +
-      `</div></td>`;
-    footprintRowsEl.appendChild(tr);
+      `<td><input type="number" class="footprint-irregular-length-input" min="0.01" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>`;
+    footprintIrregularRowsEl.appendChild(tr);
   }
-  footprintRowsEl.querySelectorAll('input[type="radio"]').forEach((el) => {
-    el.addEventListener("change", updateFootprintCornerNote);
+}
+
+function buildFootprintDiagonalRows(seedVertices) {
+  // Mirrors the site plot's own diagonals-from-corner-A section exactly (same N-3 rule,
+  // same fan triangulation) - just scoped to the footprint's own table/note elements.
+  const n = footprintSideCount();
+  const labels = labelsFor(n);
+  footprintDiagonalRowsEl.innerHTML = "";
+  const count = diagonalCount(n);
+  if (count === 0) {
+    footprintDiagonalsTableEl.style.display = "none";
+    footprintDiagonalsNoteEl.textContent = "None needed - 3 sides alone fully determine a triangle.";
+    return;
+  }
+  footprintDiagonalsNoteEl.textContent =
+    `${count} diagonal(s) needed from corner ${labels[0]} to fully determine this ${n}-sided shape - ` +
+    `seeded below to match a regular-ish starting shape, adjust as needed.`;
+  footprintDiagonalsTableEl.style.display = "table";
+  for (let k = 2; k <= n - 2; k++) {
+    const tr = document.createElement("tr");
+    const seedDist = seedVertices
+      ? Math.hypot(seedVertices[k].x - seedVertices[0].x, seedVertices[k].y - seedVertices[0].y)
+      : displayToFeet(14);
+    tr.innerHTML =
+      `<td>${labels[0]}-${labels[k]}</td>` +
+      `<td><input type="number" class="footprint-diagonal-input" min="0.01" step="any" value="${feetToDisplay(seedDist).toFixed(2)}" /></td>`;
+    footprintDiagonalRowsEl.appendChild(tr);
+  }
+}
+
+function seedFootprintIrregular(n, seedVertices) {
+  // Seeds the irregular edge/diagonal inputs - from an existing footprint shape's actual
+  // vertices when one exists (e.g. switching the checkbox on keeps whatever was already
+  // drawn), or from a plain regular-polygon walk otherwise, exactly like the site plot's own
+  // "freeze the current shape, just seed diagonals from it" behaviour.
+  let vertices = seedVertices;
+  if (!vertices || vertices.length !== n) {
+    const regularAngle = ((n - 2) * 180) / n;
+    vertices = walkRegular(new Array(n).fill(displayToFeet(10)), regularAngle);
+  }
+  const lengths = vertices.map((v, i) => {
+    const next = vertices[(i + 1) % n];
+    return Math.hypot(next.x - v.x, next.y - v.y);
   });
-  updateFootprintCornerNote();
+  buildFootprintIrregularRows({ lengths });
+  buildFootprintDiagonalRows(vertices);
+  // The seeded shape always closes by construction (either a fresh regular-polygon walk, or
+  // the exact vertices already on screen) - show it right away instead of waiting for a
+  // manual click, matching the rectilinear side's own auto-preview behaviour.
+  if (lastBuildable) previewFootprint();
+}
+
+function footprintSolveIrregular() {
+  const n = footprintSideCount();
+  const lengths = readFootprintIrregularLengths();
+  if (lengths.length !== n || lengths.some((l) => !l || l <= 0)) {
+    return { ok: false, error: "Every side needs a length greater than zero." };
+  }
+  const diagonals = readFootprintDiagonalsList();
+  return solveFromDiagonals(lengths, diagonals);
+}
+
+function seedFootprintTemplate(n) {
+  // Generates an actual valid, already-closing shape (not just placeholder numbers) for the
+  // given side count - a rectangle, L, T, or plus, sized and positioned to sit inside the
+  // current buildable area - then derives the length/angle values that reproduce it, so
+  // "Preview footprint" (or the auto-preview below) succeeds immediately instead of the user
+  // having to hand-fix lengths for a shape the count-check alone can't fully validate.
+  if (!lastBuildable) return;
+  const vertices = computeDefaultFootprintVertices(n, lastBuildable, footprintOrientation);
+  if (!vertices) {
+    // No ready-made template beyond 20 sides - fall back to plain placeholder values the
+    // user can adjust by hand, same as before this feature existed.
+    buildFootprintRows();
+    return;
+  }
+  const count = vertices.length;
+  const lengths = vertices.map((v, i) => {
+    const next = vertices[(i + 1) % count];
+    return Math.hypot(next.x - v.x, next.y - v.y);
+  });
+  const angles = interiorAnglesFromVertices(vertices).map((a) => Math.round(a));
+  footprintStartXEl.value = feetToDisplay(vertices[0].x).toFixed(2);
+  footprintStartYEl.value = feetToDisplay(vertices[0].y).toFixed(2);
+  buildFootprintRows({ lengths, angles });
+  // Visible right away, not just sitting in the form fields waiting for a manual click - run
+  // it through the same validated /compute-footprint round trip immediately so it's drawn
+  // and contained-checked already.
+  previewFootprint();
 }
 
 function initFootprintDefaults() {
@@ -1217,20 +1457,40 @@ function initFootprintDefaults() {
   footprintDefaultsInitialized = true;
   footprintPlaceholderNoteEl.style.display = "none";
   footprintPreviewBtn.disabled = false;
-  const d = computeDefaultFootprint(lastBuildable);
+  changeShapeBtn.disabled = false;
   footprintSidesCountEl.value = 4;
-  footprintStartXEl.value = feetToDisplay(d.startX).toFixed(2);
-  footprintStartYEl.value = feetToDisplay(d.startY).toFixed(2);
-  buildFootprintRows({ lengths: [d.width, d.height, d.width, d.height], angles: [90, 90, 90, 90] });
+  footprintOrientation = 0;
+  seedFootprintTemplate(4);
 }
 
 function drawFootprintPreview() {
   if (!currentVertices) return;
-  const boundsSource = currentVertices.concat(lastFootprintVertices || []);
+  const gapPts = lastFootprintGapWalk || [];
+  const boundsSource = currentVertices.concat(lastFootprintVertices || []).concat(gapPts);
   const transform = svgTransformFor(boundsSource);
   let svg = `<polygon points="${polygonPoints(transform, currentVertices)}" fill="none" stroke="#1f2430" stroke-width="2" />`;
   if (lastBuildable && lastBuildable.length >= 3) {
     svg += `<polygon points="${polygonPoints(transform, lastBuildable)}" fill="none" stroke="#999999" stroke-width="1.5" stroke-dasharray="6,4" />`;
+  }
+  if (gapPts.length >= 2) {
+    const labels = labelsFor(gapPts.length - 1);
+    const placed = gapPts.slice(0, -1);
+    const rawEnd = gapPts[gapPts.length - 1];
+    const start = gapPts[0];
+    const walkedPath = gapPts.map((p, i) => `${i === 0 ? "M" : "L"}${transform(p).x.toFixed(1)},${transform(p).y.toFixed(1)}`).join(" ");
+    svg += `<path d="${walkedPath}" fill="none" stroke="#1a5fb4" stroke-width="2" />`;
+    const pStart = transform(start), pEnd = transform(rawEnd);
+    svg += `<line x1="${pEnd.x.toFixed(1)}" y1="${pEnd.y.toFixed(1)}" x2="${pStart.x.toFixed(1)}" y2="${pStart.y.toFixed(1)}" ` +
+      `stroke="#c0392b" stroke-width="2" stroke-dasharray="5,4" />`;
+    const gapLen = Math.hypot(rawEnd.x - start.x, rawEnd.y - start.y);
+    const mid = { x: (pEnd.x + pStart.x) / 2, y: (pEnd.y + pStart.y) / 2 };
+    svg += `<text x="${mid.x.toFixed(1)}" y="${(mid.y - 6).toFixed(1)}" font-size="11" font-weight="700" ` +
+      `fill="#c0392b" text-anchor="middle">Gap: ${feetToDisplay(gapLen).toFixed(2)} ${unitLabel()}</text>`;
+    placed.forEach((v, i) => {
+      const p = transform(v);
+      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#1a5fb4" />`;
+      svg += `<text x="${(p.x + 8).toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="12" font-weight="700" fill="#1a5fb4">${labels[i]}</text>`;
+    });
   }
   if (lastFootprintVertices && lastFootprintVertices.length >= 3) {
     const n = lastFootprintVertices.length;
@@ -1273,23 +1533,44 @@ async function previewFootprint() {
     return;
   }
   const n = footprintSideCount();
-  if (n % 2 !== 0 || n < 4) {
-    showFootprintError(`Number of sides must be even and at least 4 (got ${n}).`);
-    return;
+  const irregular = footprintIrregularToggleEl.checked;
+
+  let lengths, interiorAngles;
+  if (irregular) {
+    if (n < 3) {
+      showFootprintError(`Number of sides must be at least 3 (got ${n}).`);
+      return;
+    }
+    const solved = footprintSolveIrregular();
+    if (!solved.ok) {
+      // A bad diagonal/length combo is a local geometry problem, not something the server
+      // needs to see - same as the site plot's own diagonal solver.
+      showFootprintError(solved.error);
+      return;
+    }
+    lengths = solved.vertices.map((v, i) => {
+      const next = solved.vertices[(i + 1) % n];
+      return Math.hypot(next.x - v.x, next.y - v.y);
+    });
+    interiorAngles = interiorAnglesFromVertices(solved.vertices).slice(1);
+  } else {
+    if (n % 2 !== 0 || n < 4) {
+      showFootprintError(`Number of sides must be even and at least 4 (got ${n}).`);
+      return;
+    }
+    if (!updateFootprintCornerNote()) {
+      showFootprintError("Corner angle counts don't add up to a closed shape yet - see the note above the table.");
+      return;
+    }
+    lengths = readFootprintLengths();
+    if (lengths.some((l) => !l || l <= 0)) {
+      showFootprintError("Every side needs a length greater than zero.");
+      return;
+    }
+    // Vertex A's angle is derived server-side, matching /compute-site's own convention
+    // (computeSite() above does the same actualAngles.slice(1)).
+    interiorAngles = readFootprintAngles().slice(1);
   }
-  if (!updateFootprintCornerNote()) {
-    showFootprintError("Corner angle counts don't add up to a closed shape yet - see the note above the table.");
-    return;
-  }
-  const lengths = readFootprintLengths();
-  if (lengths.some((l) => !l || l <= 0)) {
-    showFootprintError("Every side needs a length greater than zero.");
-    return;
-  }
-  const allAngles = readFootprintAngles();
-  // Vertex A's angle is derived server-side, matching /compute-site's own convention
-  // (computeSite() above does the same actualAngles.slice(1)).
-  const interiorAngles = allAngles.slice(1);
 
   const body = {
     lengths,
@@ -1315,9 +1596,16 @@ async function previewFootprint() {
     if (!data.success) {
       showFootprintError(`[${data.stage || "error"}] ${data.error}`);
       footprintStatusNoteEl.textContent = "";
+      // Show the actual gap instead of leaving the drawing blank - walk the same
+      // lengths/angles client-side (no closure correction) so the user can see exactly
+      // where the boundary stops short of closing.
+      lastFootprintVertices = null;
+      lastFootprintGapWalk = walkOpenPolygon(lengths, interiorAngles, body.start, 0);
+      drawFootprintPreview();
       return;
     }
 
+    lastFootprintGapWalk = null;
     lastFootprintVertices = data.footprint.vertices;
     drawFootprintPreview();
     footprintStatusNoteEl.textContent = data.adjusted
@@ -1346,13 +1634,59 @@ async function previewFootprint() {
 
 footprintSidesCountEl.addEventListener("change", () => {
   let n = footprintSideCount();
+  if (footprintIrregularToggleEl.checked) {
+    if (n < 3) n = 3;
+    footprintSidesCountEl.value = n;
+    seedFootprintIrregular(n, null);
+    return;
+  }
   if (n < 4) n = 4;
   if (n % 2 !== 0) n += 1;
   footprintSidesCountEl.value = n;
-  buildFootprintRows();
-  drawFootprintPreview();
+  footprintOrientation = 0;
+  if (lastBuildable) {
+    seedFootprintTemplate(n);
+  } else {
+    buildFootprintRows();
+    drawFootprintPreview();
+  }
 });
 footprintPreviewBtn.addEventListener("click", previewFootprint);
+changeShapeBtn.addEventListener("click", () => {
+  const n = footprintSideCount();
+  const count = footprintVariantCount(n) || 1;
+  footprintOrientation = (footprintOrientation + 1) % count;
+  seedFootprintTemplate(n);
+});
+footprintIrregularToggleEl.addEventListener("change", () => {
+  const irregular = footprintIrregularToggleEl.checked;
+  footprintRectilinearGroupEl.style.display = irregular ? "none" : "block";
+  changeShapeFieldEl.style.display = irregular ? "none" : "flex";
+  footprintIrregularGroupEl.style.display = irregular ? "block" : "none";
+  footprintCornerNoteEl.style.display = irregular ? "none" : "block";
+
+  if (irregular) {
+    // Sides no longer need to be even - an irregular footprint can have any shape, just
+    // like a triangle needs no diagonals at all.
+    footprintSidesCountEl.min = "3";
+    footprintSidesCountEl.step = "1";
+    let n = footprintSideCount();
+    if (n < 3) { n = 3; footprintSidesCountEl.value = n; }
+    // Keep whatever shape is already on screen as the starting point - freeze it into
+    // lengths/diagonals rather than resetting to a plain default, same as the site plot's
+    // own "uncheck regular, seed diagonals from the current shape" behaviour.
+    seedFootprintIrregular(n, lastFootprintVertices);
+  } else {
+    footprintSidesCountEl.min = "4";
+    footprintSidesCountEl.step = "2";
+    let n = footprintSideCount();
+    if (n < 4) n = 4;
+    if (n % 2 !== 0) n += 1;
+    footprintSidesCountEl.value = n;
+    footprintOrientation = 0;
+    if (lastBuildable) seedFootprintTemplate(n);
+  }
+});
 
 unitSelectEl.addEventListener("change", () => {
   const oldUnit = currentUnit;

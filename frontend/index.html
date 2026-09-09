@@ -266,11 +266,11 @@
     <h2>Building footprint</h2>
     <p class="hint">
       Draw the outer wall line of the building itself, sitting inside the buildable area
-      already computed above. Unlike the site plot, a building's walls are always square to
-      each other, so instead of diagonals, every corner is simply <strong>90&deg;</strong>
-      (a normal outward corner) or <strong>270&deg;</strong> (an inward notch, for an L, U, T,
-      or plus shape). A valid closed footprint always has exactly 4 more 90&deg; corners than
-      270&deg; corners.
+      already computed above. Pick how many sides you need and a ready-made shape (rectangle,
+      L, T, or plus) is generated to fit - click <strong>Change shape</strong> to spin the
+      notch(es) to a different corner instead of hand-picking 90&deg;/270&deg; corners
+      yourself, which almost never lands on a shape that actually closes. Adjust individual
+      side lengths afterwards to resize it.
     </p>
 
     <div class="site-preview">
@@ -280,13 +280,23 @@
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area</span>
       <span><span class="swatch" style="border-color:#1a5fb4;"></span>Building footprint</span>
+      <span><span class="swatch" style="border-color:#c0392b; border-top-style:dashed;"></span>Gap (boundary doesn't close)</span>
     </div>
     <p class="hint" id="footprintPlaceholderNote">Compute the buildable area above first.</p>
+
+    <div class="checkbox-row" style="margin-top: 14px;">
+      <input type="checkbox" id="footprintIrregularToggle" autocomplete="off" />
+      <label for="footprintIrregularToggle">Footprint is irregular (arbitrary angles, entered with diagonals - like the site plot)</label>
+    </div>
 
     <div class="row" style="margin-top: 14px;">
       <div class="field">
         <label for="footprintSidesCount">Number of sides</label>
         <input type="number" id="footprintSidesCount" min="4" max="20" step="2" value="4" />
+      </div>
+      <div class="field" id="changeShapeField">
+        <label>&nbsp;</label>
+        <button id="changeShapeBtn" type="button" class="secondary" disabled>Change shape</button>
       </div>
       <div class="field">
         <label for="footprintStartX" id="footprintStartXLabel">Start X (ft)</label>
@@ -299,16 +309,45 @@
     </div>
     <p class="hint" id="footprintCornerNote"></p>
 
-    <table class="edge-table">
-      <thead>
-        <tr>
-          <th style="width: 90px;">Edge</th>
-          <th id="footprintLengthHeader">Length (ft)</th>
-          <th style="width: 220px;">Corner angle</th>
-        </tr>
-      </thead>
-      <tbody id="footprintRows"></tbody>
-    </table>
+    <div id="footprintRectilinearGroup">
+      <table class="edge-table">
+        <thead>
+          <tr>
+            <th style="width: 70px;">Vertex</th>
+            <th style="width: 220px;">Corner angle</th>
+            <th style="width: 90px;">Edge</th>
+            <th id="footprintLengthHeader">Length (ft)</th>
+          </tr>
+        </thead>
+        <tbody id="footprintRows"></tbody>
+      </table>
+    </div>
+
+    <div id="footprintIrregularGroup" style="display:none;">
+      <table class="edge-table">
+        <thead>
+          <tr>
+            <th style="width: 90px;">Edge</th>
+            <th id="footprintIrregularLengthHeader">Length (ft)</th>
+          </tr>
+        </thead>
+        <tbody id="footprintIrregularRows"></tbody>
+      </table>
+
+      <div style="margin-top: 16px;">
+        <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals from corner A</h3>
+        <p class="hint" id="footprintDiagonalsNote"></p>
+        <table class="edge-table" id="footprintDiagonalsTable" style="display:none;">
+          <thead>
+            <tr>
+              <th style="width: 90px;">Diagonal</th>
+              <th id="footprintDiagonalLengthHeader">Length (ft)</th>
+            </tr>
+          </thead>
+          <tbody id="footprintDiagonalRows"></tbody>
+        </table>
+      </div>
+    </div>
 
     <div class="row" style="margin-top: 14px;">
       <button id="footprintPreviewBtn" disabled>Preview footprint</button>
