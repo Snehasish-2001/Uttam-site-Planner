@@ -13,13 +13,14 @@
   <div class="step-nav">
     <span class="step-pill todo" data-step="1">1. Project &amp; legal - coming soon</span>
     <span class="step-pill active" data-step="2">2. Site plan</span>
+    <span class="step-pill" data-step="masterplan">Master plan</span>
     <span class="step-pill" data-step="3">3. Footprint</span>
     <span class="step-pill todo" data-step="4">4. Floors &amp; rooms - coming soon</span>
   </div>
 </header>
 
 <main>
-<div class="wizard-page" id="wizardPage2">
+<div class="shared-with-masterplan" id="wizardPage2">
   <section class="card">
     <h2>Site plot - metes and bounds</h2>
     <p class="hint">
@@ -144,133 +145,9 @@
     </div>
   </section>
 
-  <section class="card">
-    <h2>Print sheet</h2>
-    <p class="hint">
-      Assemble the finalised site plan above into a printable sheet, the way a surveyor's
-      sketch map presents it: a header block, the mouza (cadastral) index map, and the site
-      plan drawing together on one page.
-    </p>
-
-    <div class="row">
-      <div class="field">
-        <label for="adminTypeSelect">Under</label>
-        <select id="adminTypeSelect">
-          <option value="Municipality" selected>Municipality</option>
-          <option value="Municipal Corporation">Municipal Corporation</option>
-          <option value="Panchayet">Panchayet</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="adminNameInput" id="adminNameLabel">Municipality name</label>
-        <input type="text" id="adminNameInput" placeholder="e.g. Purulia" />
-      </div>
-      <div class="field">
-        <label for="wardNoInput">Ward No.</label>
-        <input type="text" id="wardNoInput" placeholder="e.g. 1" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="rsKhatianInput">R.S Khatian No.</label>
-        <input type="text" id="rsKhatianInput" placeholder="e.g. 191" />
-      </div>
-      <div class="field">
-        <label for="rsPlotInput">R.S Plot No.</label>
-        <input type="text" id="rsPlotInput" placeholder="e.g. 4718/P" />
-      </div>
-      <div class="field">
-        <label for="csPlotInput">C.S Plot No.</label>
-        <input type="text" id="csPlotInput" placeholder="e.g. 968/P" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label>Sketch map</label>
-        <div class="checkbox-row">
-          <input type="radio" name="sketchScaleMode" value="nts" id="sketchScaleNTS" />
-          <label for="sketchScaleNTS">Not to scale</label>
-          <input type="radio" name="sketchScaleMode" value="scale" id="sketchScaleToScale" checked style="margin-left: 10px;" />
-          <label for="sketchScaleToScale">To scale</label>
-        </div>
-        <div class="ratio-row" id="sketchScaleRatioRow" style="display: flex;">
-          <input type="number" id="sketchScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="sketchScaleY" placeholder="y" min="0" step="any" value="1" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Site plan</label>
-        <div class="checkbox-row">
-          <input type="radio" name="siteScaleMode" value="nts" id="siteScaleNTS" />
-          <label for="siteScaleNTS">Not to scale</label>
-          <input type="radio" name="siteScaleMode" value="scale" id="siteScaleToScale" checked style="margin-left: 10px;" />
-          <label for="siteScaleToScale">To scale</label>
-        </div>
-        <div class="ratio-row" id="siteScaleRatioRow" style="display: flex;">
-          <input type="number" id="siteScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="siteScaleY" placeholder="y" min="0" step="any" value="1" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Mouza map</label>
-        <div class="checkbox-row">
-          <input type="radio" name="mouzaScaleMode" value="nts" id="mouzaScaleNTS" />
-          <label for="mouzaScaleNTS">Not to scale</label>
-          <input type="radio" name="mouzaScaleMode" value="scale" id="mouzaScaleToScale" checked style="margin-left: 10px;" />
-          <label for="mouzaScaleToScale">To scale</label>
-        </div>
-        <div class="ratio-row" id="mouzaScaleRatioRow" style="display: flex;">
-          <input type="number" id="mouzaScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="mouzaScaleY" placeholder="y" min="0" step="any" value="1" />
-        </div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="surveyorNameInput">Surveyor name</label>
-        <input type="text" id="surveyorNameInput" placeholder="e.g. Bidyut Kumar Mahato" />
-      </div>
-      <div class="field">
-        <label for="surveyorRegdInput">Surveyor Regd. No.</label>
-        <input type="text" id="surveyorRegdInput" placeholder="e.g. 02711" />
-      </div>
-      <div class="field" style="flex: 1; min-width: 220px;">
-        <label for="drawnByInput">Drawn by (address)</label>
-        <input type="text" id="drawnByInput" placeholder="e.g. Kurmashol, Kuda, Kenda, Purulia" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field" style="flex: 1; min-width: 320px;">
-        <label for="additionalNotesInput">Additional notes (signatures, P.S./District, reference area, etc.)</label>
-        <textarea id="additionalNotesInput" rows="4" placeholder="P.S- ..., DIST- ...,&#10;REF. AREA- ... SQ.FT./... KATHA. ... CHH SHOWN IN"></textarea>
-      </div>
-      <div class="field">
-        <label for="mouzaMapInput">Mouza map image</label>
-        <input type="file" id="mouzaMapInput" accept="image/*" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="previewPdfBtn">Preview PDF</button>
-      <button id="downloadPdfBtn" disabled>Download PDF</button>
-      <span id="pdfNote" class="hint" style="margin: 0;"></span>
-    </div>
-
-    <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="buildMasterPlanBtn" type="button" class="secondary">Build master plan</button>
-    </div>
-  </section>
-
-  <section class="card" id="roadLogicCard" style="display:none;">
+</div>
+<div class="wizard-page" id="wizardPagemasterplan" style="display:none;">
+  <section class="card" id="roadLogicCard">
     <h2>Road logic</h2>
     <p class="hint">
       Lay out the internal road network you'll carve this plot into smaller lots along - each
@@ -314,7 +191,7 @@
     <div class="legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
-      <span><span class="swatch" style="border-color:#2f6f4f; border-top-style:dashed;"></span>Sub-section</span>
+      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
       <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
     </div>
     <p class="hint" id="plotLogicNote"></p>
@@ -339,7 +216,7 @@
     <div class="legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
-      <span><span class="swatch" style="border-color:#2f6f4f; border-top-style:dashed;"></span>Sub-section</span>
+      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
       <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
     </div>
     <div id="masterPlanSummary" class="result-box" style="display:none;"></div>
@@ -465,6 +342,131 @@
 
     <div id="footprintAreaSummary" class="result-box" style="display:none;"></div>
     <div id="footprintErrorBox" class="error-box" style="display:none;"></div>
+  </section>
+</div>
+
+<div class="shared-with-masterplan" id="printSheetAlways">
+  <section class="card">
+    <h2>Print sheet</h2>
+    <p class="hint">
+      Assemble the finalised site plan above into a printable sheet, the way a surveyor's
+      sketch map presents it: a header block, the mouza (cadastral) index map, and the site
+      plan drawing together on one page. Always available here regardless of which wizard step
+      is open above, since it's the last stage of both the plain site plan and the master plan.
+    </p>
+
+    <div class="row">
+      <div class="field">
+        <label for="adminTypeSelect">Under</label>
+        <select id="adminTypeSelect">
+          <option value="Municipality" selected>Municipality</option>
+          <option value="Municipal Corporation">Municipal Corporation</option>
+          <option value="Panchayet">Panchayet</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adminNameInput" id="adminNameLabel">Municipality name</label>
+        <input type="text" id="adminNameInput" placeholder="e.g. Purulia" />
+      </div>
+      <div class="field">
+        <label for="wardNoInput">Ward No.</label>
+        <input type="text" id="wardNoInput" placeholder="e.g. 1" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="rsKhatianInput">R.S Khatian No.</label>
+        <input type="text" id="rsKhatianInput" placeholder="e.g. 191" />
+      </div>
+      <div class="field">
+        <label for="rsPlotInput">R.S Plot No.</label>
+        <input type="text" id="rsPlotInput" placeholder="e.g. 4718/P" />
+      </div>
+      <div class="field">
+        <label for="csPlotInput">C.S Plot No.</label>
+        <input type="text" id="csPlotInput" placeholder="e.g. 968/P" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label>Sketch map</label>
+        <div class="checkbox-row">
+          <input type="radio" name="sketchScaleMode" value="nts" id="sketchScaleNTS" />
+          <label for="sketchScaleNTS">Not to scale</label>
+          <input type="radio" name="sketchScaleMode" value="scale" id="sketchScaleToScale" checked style="margin-left: 10px;" />
+          <label for="sketchScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="sketchScaleRatioRow" style="display: flex;">
+          <input type="number" id="sketchScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="sketchScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Site plan</label>
+        <div class="checkbox-row">
+          <input type="radio" name="siteScaleMode" value="nts" id="siteScaleNTS" />
+          <label for="siteScaleNTS">Not to scale</label>
+          <input type="radio" name="siteScaleMode" value="scale" id="siteScaleToScale" checked style="margin-left: 10px;" />
+          <label for="siteScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="siteScaleRatioRow" style="display: flex;">
+          <input type="number" id="siteScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="siteScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Mouza map</label>
+        <div class="checkbox-row">
+          <input type="radio" name="mouzaScaleMode" value="nts" id="mouzaScaleNTS" />
+          <label for="mouzaScaleNTS">Not to scale</label>
+          <input type="radio" name="mouzaScaleMode" value="scale" id="mouzaScaleToScale" checked style="margin-left: 10px;" />
+          <label for="mouzaScaleToScale">To scale</label>
+        </div>
+        <div class="ratio-row" id="mouzaScaleRatioRow" style="display: flex;">
+          <input type="number" id="mouzaScaleX" placeholder="x" min="0" step="any" value="16" />
+          <span>:</span>
+          <input type="number" id="mouzaScaleY" placeholder="y" min="0" step="any" value="1" />
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="surveyorNameInput">Surveyor name</label>
+        <input type="text" id="surveyorNameInput" placeholder="e.g. Bidyut Kumar Mahato" />
+      </div>
+      <div class="field">
+        <label for="surveyorRegdInput">Surveyor Regd. No.</label>
+        <input type="text" id="surveyorRegdInput" placeholder="e.g. 02711" />
+      </div>
+      <div class="field" style="flex: 1; min-width: 220px;">
+        <label for="drawnByInput">Drawn by (address)</label>
+        <input type="text" id="drawnByInput" placeholder="e.g. Kurmashol, Kuda, Kenda, Purulia" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field" style="flex: 1; min-width: 320px;">
+        <label for="additionalNotesInput">Additional notes (signatures, P.S./District, reference area, etc.)</label>
+        <textarea id="additionalNotesInput" rows="4" placeholder="P.S- ..., DIST- ...,&#10;REF. AREA- ... SQ.FT./... KATHA. ... CHH SHOWN IN"></textarea>
+      </div>
+      <div class="field">
+        <label for="mouzaMapInput">Mouza map image</label>
+        <input type="file" id="mouzaMapInput" accept="image/*" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="previewPdfBtn">Preview PDF</button>
+      <button id="downloadPdfBtn" disabled>Download PDF</button>
+      <span id="pdfNote" class="hint" style="margin: 0;"></span>
+    </div>
+
+    <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
   </section>
 </div>
 

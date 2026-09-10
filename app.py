@@ -298,8 +298,8 @@ async def insert_plots_endpoint(request: Request):
     tiled edge-to-edge with triangles via constrained Delaunay triangulation, so nothing in
     the sub-section goes unaccounted for as "waste" that a rectangle-only approach would have
     left in the corners. `body` must have 'subsection': {vertices:[...]}, 'roadFacingEdges':
-    [{a:{x,y}, b:{x,y}}, ...], and 'params': {minArea, maxArea, minGap, roadThreshold,
-    minSides, maxSides, maxPlots}."""
+    [{a:{x,y}, b:{x,y}}, ...], and 'params': {minLength, maxLength, minWidth, maxWidth,
+    minGap, roadThreshold, maxPlots}."""
     try:
         body = await request.json()
         if not isinstance(body, dict):

@@ -306,8 +306,6 @@ const previewPdfBtn = document.getElementById("previewPdfBtn");
 const downloadPdfBtn = document.getElementById("downloadPdfBtn");
 const pdfNoteEl = document.getElementById("pdfNote");
 const pdfPreviewFrameEl = document.getElementById("pdfPreviewFrame");
-const buildMasterPlanBtn = document.getElementById("buildMasterPlanBtn");
-const roadLogicCardEl = document.getElementById("roadLogicCard");
 const addRoadBtnEl = document.getElementById("addRoadBtn");
 const roadLogicSvgEl = document.getElementById("roadLogicSvg");
 const roadRowsEl = document.getElementById("roadRows");
@@ -468,7 +466,7 @@ function buildEdgeRows() {
     lengthInput.type = "number";
     lengthInput.step = "0.01";
     lengthInput.min = "0.01";
-    lengthInput.value = feetToDisplay(20).toFixed(2);
+    lengthInput.value = feetToDisplay(200).toFixed(2);
     lengthInput.className = "length-input";
     lengthInput.disabled = regularToggleEl.checked && i > 0;
     lengthInput.addEventListener("input", onLengthChanged);
@@ -706,10 +704,6 @@ function sqFeetToDisplayArea(sqft) {
   return currentUnit === "m" ? sqft / (FT_PER_M * FT_PER_M) : sqft;
 }
 
-function displayAreaToSqFeet(area) {
-  return currentUnit === "m" ? area * FT_PER_M * FT_PER_M : area;
-}
-
 function areaUnitLabel() {
   return currentUnit === "m" ? "sq m" : "sq ft";
 }
@@ -921,6 +915,58 @@ function buildPlotSvg(plotVertices, options) {
   return { svg, transform };
 }
 
+// Draws every finalized internal road (from Road logic) as a true-to-scale band - the
+// carriageway itself (solid) plus, when a buffer is set, a lighter fringe on both sides for
+// the extra clearance /compute-subsections also carves out of the sub-sections beyond the
+// road's own width. Previously roads were drawn as a flat 5px line regardless of their real
+// width, so the genuine to-scale gap Plot Logic leaves around a road (which is just the
+// road's own width) looked like an unexplained mystery buffer with no way to control it.
+// Offsets every point of a polyline perpendicular to it by a fixed distance h, using the
+// averaged normal of a point's two adjacent segments at interior points (the standard
+// mitred-offset construction) - for a plain 2-point straight path this reduces to exactly the
+// single-segment-normal quad this function used to hand-build, so straight roads are unaffected.
+function offsetPolyline(path, h) {
+  const segCount = path.length - 1;
+  const segNormals = [];
+  for (let i = 0; i < segCount; i++) {
+    const dx = path[i + 1].x - path[i].x, dy = path[i + 1].y - path[i].y;
+    const len = Math.hypot(dx, dy) || 1;
+    segNormals.push({ x: -dy / len, y: dx / len });
+  }
+  return path.map((p, i) => {
+    let nx, ny;
+    if (i === 0) { nx = segNormals[0].x; ny = segNormals[0].y; }
+    else if (i === path.length - 1) { nx = segNormals[segCount - 1].x; ny = segNormals[segCount - 1].y; }
+    else {
+      nx = segNormals[i - 1].x + segNormals[i].x;
+      ny = segNormals[i - 1].y + segNormals[i].y;
+      const l = Math.hypot(nx, ny) || 1;
+      nx /= l; ny /= l;
+    }
+    return { x: p.x + nx * h, y: p.y + ny * h };
+  });
+}
+
+function internalRoadBandSvg(transform) {
+  let svg = "";
+  (roads || []).forEach((r) => {
+    if (!r) return;
+    const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
+    const half = r.width / 2;
+    const buffer = r.buffer || 0;
+    const bandPoints = (h) => {
+      const left = offsetPolyline(path, h);
+      const right = offsetPolyline(path, -h).slice().reverse();
+      return left.concat(right).map(transform).map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    };
+    if (buffer > 0) {
+      svg += `<polygon points="${bandPoints(half + buffer)}" fill="#7d5ba6" opacity="0.15" stroke="none" />`;
+    }
+    svg += `<polygon points="${bandPoints(half)}" fill="#7d5ba6" opacity="0.55" stroke="none" />`;
+  });
+  return svg;
+}
+
 function drawPreview(plotVertices, buildableVertices) {
   const { svg: baseSvg, transform } = buildPlotSvg(plotVertices);
   let svg = baseSvg;
@@ -931,12 +977,7 @@ function drawPreview(plotVertices, buildableVertices) {
 
   // Any roads already laid out in Road Logic - shown here too so the site plan itself
   // reflects the master plan, not just the Road Logic/Plot Logic cards further down.
-  (roads || []).forEach((r) => {
-    if (!r) return;
-    const pA = transform(r.start), pB = transform(r.end);
-    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
-      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
-  });
+  svg += internalRoadBandSvg(transform);
 
   svgEl.innerHTML = svg;
   updateAreaSummary(plotVertices);
@@ -1277,6 +1318,7 @@ async function computeSite() {
     drawPreview(data.plot.vertices, lastBuildable);
     initFootprintDefaults();
     drawFootprintPreview();
+    drawRoadLogicPreview(); // keep the Master plan page's own preview in sync too, in case it's already open
 
     let msg = `Buildable area computed (${data.buildable.vertices.length} vertices).`;
     if (data.adjusted) msg += ` Closure auto-corrected (${data.closure_error_ft} ft error).`;
@@ -2047,6 +2089,9 @@ function addRoadRow() {
     `<option value="spine">Spine</option><option value="loop">Loop</option>` +
     `<option value="branch">Branch</option><option value="culdesac">Cul-de-sac</option>` +
     `</select></div>` +
+    `<div class="field"><label>Shape</label><select class="road-shape-select">` +
+    `<option value="straight">Straight</option><option value="curved">Curved</option>` +
+    `</select></div>` +
     `<div class="field"><label>Start</label><select class="road-start-select"></select></div>` +
     `<div class="field"><label class="road-start-distance-label">Distance (ft)</label>` +
     `<input type="number" class="road-start-distance-input" step="any" /></div>` +
@@ -2058,6 +2103,11 @@ function addRoadRow() {
     `<div class="field road-deadend-direction" style="display:none;"><label>Perpendicular to side</label>` +
     `<select class="road-deadend-direction-select"></select></div>` +
     `<div class="field"><label>Width (ft)</label><input type="number" class="road-width-input" step="any" min="0.1" value="${feetToDisplay(12).toFixed(2)}" /></div>` +
+    `<div class="field"><label>Buffer (ft)</label><input type="number" class="road-buffer-input" step="any" min="0" value="0" /></div>` +
+    `<div class="field road-curve-bulge" style="display:none;"><label>Curve bulge (ft)</label>` +
+    `<input type="number" class="road-bulge-input" step="any" min="0" value="${feetToDisplay(10).toFixed(2)}" /></div>` +
+    `<div class="field road-curve-direction" style="display:none;"><label>Curve direction</label>` +
+    `<select class="road-direction-select"><option value="left">Left of travel</option><option value="right">Right of travel</option></select></div>` +
     `<div class="field"><label>&nbsp;</label><button type="button" class="secondary road-remove-btn">Remove road</button></div>` +
     `</div>`;
   roadRowsEl.appendChild(div);
@@ -2072,6 +2122,12 @@ function addRoadRow() {
   const endDistanceLabel = div.querySelector(".road-end-distance-label");
   const endDistanceInput = div.querySelector(".road-end-distance-input");
   const widthInput = div.querySelector(".road-width-input");
+  const bufferInput = div.querySelector(".road-buffer-input");
+  const shapeSelect = div.querySelector(".road-shape-select");
+  const curveBulgeField = div.querySelector(".road-curve-bulge");
+  const curveDirectionField = div.querySelector(".road-curve-direction");
+  const bulgeInput = div.querySelector(".road-bulge-input");
+  const directionSelect = div.querySelector(".road-direction-select");
   const deadendLengthField = div.querySelector(".road-deadend-length");
   const deadendDirField = div.querySelector(".road-deadend-direction");
   const deadendLengthInput = div.querySelector(".road-deadend-length-input");
@@ -2101,11 +2157,22 @@ function addRoadRow() {
     deadendDirField.style.display = isDeadEnd ? "flex" : "none";
     endDistanceField.style.display = isDeadEnd ? "none" : "flex";
   }
+  function updateCurveVisibility() {
+    const isCurved = shapeSelect.value === "curved";
+    curveBulgeField.style.display = isCurved ? "flex" : "none";
+    curveDirectionField.style.display = isCurved ? "flex" : "none";
+  }
   reseedStartDistance();
   updateDeadendVisibility();
+  updateCurveVisibility();
   if (endSelect.value !== "deadend") reseedEndDistance();
 
-  [nameInput, typeSelect, widthInput, startDistanceInput, endDistanceInput, deadendLengthInput, deadendDirSelect].forEach((el) => {
+  shapeSelect.addEventListener("change", () => {
+    updateCurveVisibility();
+    recomputeAllRoads();
+  });
+
+  [nameInput, typeSelect, widthInput, bufferInput, bulgeInput, directionSelect, startDistanceInput, endDistanceInput, deadendLengthInput, deadendDirSelect].forEach((el) => {
     el.addEventListener("input", recomputeAllRoads);
     el.addEventListener("change", recomputeAllRoads);
   });
@@ -2118,6 +2185,73 @@ function addRoadRow() {
     if (endSelect.value !== "deadend") reseedEndDistance();
     recomputeAllRoads();
   });
+}
+
+// A curved road is modelled as a real circular arc between its start and end (the same
+// "horizontal curve" convention actual road design uses) rather than an arbitrary freehand
+// bend - "bulge" is the sagitta: how far the arc's own midpoint deviates, perpendicular to
+// the straight line between start and end, on the chosen side of the direction of travel.
+// bulge <= 0 (or a degenerate zero-length chord) just returns the straight two-point path.
+// Returns a polyline (start, ...intermediate arc points..., end) since every downstream
+// consumer - the shapely strip cut, frontage detection, band rendering - already works on an
+// arbitrary polyline path, not just a single straight segment.
+function arcPointsForRoad(start, end, bulgeFt, direction, segments) {
+  segments = segments || 24;
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const chordLen = Math.hypot(dx, dy);
+  if (!bulgeFt || bulgeFt <= 1e-6 || chordLen < 1e-6) return [start, end];
+
+  const ux = dx / chordLen, uy = dy / chordLen;
+  // 'left of travel' = rotate the travel direction 90 degrees counter-clockwise.
+  const nx = direction === "right" ? uy : -uy;
+  const ny = direction === "right" ? -ux : ux;
+
+  const halfChord = chordLen / 2;
+  const s = bulgeFt;
+  const radius = (halfChord * halfChord + s * s) / (2 * s);
+  const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  // The circle's centre sits on the opposite side of the chord from the bulge, at distance
+  // (radius - sagitta) from the chord's own midpoint.
+  const center = { x: mid.x - nx * (radius - s), y: mid.y - ny * (radius - s) };
+
+  const a0 = Math.atan2(start.y - center.y, start.x - center.x);
+  const a1 = Math.atan2(end.y - center.y, end.x - center.x);
+  const sagittaPoint = { x: mid.x + nx * s, y: mid.y + ny * s };
+  const aBulge = Math.atan2(sagittaPoint.y - center.y, sagittaPoint.x - center.x);
+
+  function normalizeDelta(from, to) {
+    let d = to - from;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    return d;
+  }
+  // Two possible sweeps (short way / long way around the circle) connect a0 to a1 - pick
+  // whichever one actually passes through the bulge side, not just the shorter arithmetic
+  // delta, since a large bulge relative to the chord needs the major arc.
+  let sweep = normalizeDelta(a0, a1);
+  const directMidAngle = a0 + sweep / 2;
+  if (Math.abs(normalizeDelta(directMidAngle, aBulge)) > Math.PI / 2) {
+    sweep = sweep > 0 ? sweep - 2 * Math.PI : sweep + 2 * Math.PI;
+  }
+
+  const points = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = a0 + sweep * (i / segments);
+    points.push({ x: center.x + radius * Math.cos(a), y: center.y + radius * Math.sin(a) });
+  }
+  points[0] = start;
+  points[points.length - 1] = end;
+  return points;
+}
+
+// Shortest distance from a point to a polyline path (a straight road's path is just its two
+// endpoints; a curved road's path is the discretized arc) - the minimum over every segment.
+function pointToPathDistance(pt, path) {
+  let best = Infinity;
+  for (let i = 0; i < path.length - 1; i++) {
+    best = Math.min(best, pointToSegmentDistance(pt, path[i], path[i + 1]));
+  }
+  return best;
 }
 
 function recomputeAllRoads() {
@@ -2160,9 +2294,39 @@ function recomputeAllRoads() {
       const uid = ref.split(":")[1];
       const r = resolved[rowIndexForUid(uid)];
       if (!r) return null;
+      // Distance is measured along the STRAIGHT chord between that road's start and end, even
+      // if the referenced road is curved - an approximation (true arc-length parameterization
+      // would need the discretized path here too), acceptable since a road connecting into a
+      // curved road is a secondary/rare case and the chord is close to the arc for gentle bulges.
       const len = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y) || 1;
       const t = distanceFt / len;
       return { x: r.start.x + t * (r.end.x - r.start.x), y: r.start.y + t * (r.end.y - r.start.y) };
+    }
+    return null;
+  }
+
+  // The unit direction of whatever a start/end connects to (a plot side, or another road's own
+  // chord) - used so a road's own end cut can be made COLINEAR with that side/road instead of
+  // perpendicular to the new road's own direction. A road meeting a boundary at an angle with a
+  // perpendicular cut leaves a sliver of leftover land wedged between the cut and the actual
+  // boundary; cutting along the boundary's own direction instead removes that sliver entirely,
+  // and naturally makes the road's own cross-section a trapezoid rather than a rectangle
+  // wherever it isn't perpendicular to what it's connecting to.
+  function refDirection(ref) {
+    if (ref.startsWith("side:")) {
+      const idx = parseInt(ref.split(":")[1], 10);
+      const a = currentVertices[idx], b = currentVertices[(idx + 1) % n];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      return { x: dx / len, y: dy / len };
+    }
+    if (ref.startsWith("road:")) {
+      const uid = ref.split(":")[1];
+      const r = resolved[rowIndexForUid(uid)];
+      if (!r) return null;
+      const dx = r.end.x - r.start.x, dy = r.end.y - r.start.y;
+      const len = Math.hypot(dx, dy) || 1;
+      return { x: dx / len, y: dy / len };
     }
     return null;
   }
@@ -2173,6 +2337,10 @@ function recomputeAllRoads() {
     const startRef = row.querySelector(".road-start-select").value;
     const endRef = row.querySelector(".road-end-select").value;
     const width = displayToFeet(parseFloat(row.querySelector(".road-width-input").value) || 0);
+    const buffer = Math.max(0, displayToFeet(parseFloat(row.querySelector(".road-buffer-input").value) || 0));
+    const shape = row.querySelector(".road-shape-select").value;
+    const bulge = Math.max(0, displayToFeet(parseFloat(row.querySelector(".road-bulge-input").value) || 0));
+    const curveDirection = row.querySelector(".road-direction-select").value;
     const startDistance = displayToFeet(parseFloat(row.querySelector(".road-start-distance-input").value) || 0);
 
     const startPoint = resolveRef(startRef, startDistance);
@@ -2208,7 +2376,15 @@ function recomputeAllRoads() {
       return;
     }
 
-    resolved.push({ name, type, width, start: startPoint, end: endPoint });
+    const startCapDir = refDirection(startRef); // null for a dead end's own start? no - start is
+                                                  // never a dead end, only end can be.
+    const endCapDir = endRef === "deadend" ? null : refDirection(endRef);
+
+    const path = shape === "curved" ? arcPointsForRoad(startPoint, endPoint, bulge, curveDirection) : [startPoint, endPoint];
+    resolved.push({
+      name, type, width, buffer, shape, bulge, curveDirection,
+      start: startPoint, end: endPoint, path, startCapDir, endCapDir,
+    });
   });
 
   roads = resolved;
@@ -2230,15 +2406,18 @@ function drawRoadLogicPreview(errors) {
   // road the site plan itself already had.
   const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
   let svg = baseSvg;
+  svg += internalRoadBandSvg(transform);
   (roads || []).forEach((r) => {
     if (!r) return;
-    const pA = transform(r.start), pB = transform(r.end);
-    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
-      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.65" />`;
-    const mid = { x: (pA.x + pB.x) / 2, y: (pA.y + pB.y) / 2 };
-    const length = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y);
+    const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
+    const midPoint = path[Math.floor(path.length / 2)];
+    const mid = transform(midPoint);
+    const chordLength = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y);
+    const bufferPart = r.buffer ? ` + ${feetToDisplay(r.buffer).toFixed(1)} ${unitLabel()} buffer/side` : "";
+    const curvePart = r.shape === "curved" ? `, curved (${feetToDisplay(r.bulge).toFixed(1)} ${unitLabel()} bulge)` : "";
     svg += `<text x="${mid.x.toFixed(1)}" y="${(mid.y - 8).toFixed(1)}" font-size="11" font-weight="700" ` +
-      `fill="#7d5ba6" text-anchor="middle">${r.name} (${feetToDisplay(length).toFixed(1)} ${unitLabel()})</text>`;
+      `fill="#7d5ba6" text-anchor="middle">${r.name} (${feetToDisplay(chordLength).toFixed(1)} ${unitLabel()} long, ` +
+      `${feetToDisplay(r.width).toFixed(1)} ${unitLabel()} wide${bufferPart}${curvePart})</text>`;
   });
   roadLogicSvgEl.innerHTML = svg;
 
@@ -2275,7 +2454,8 @@ function isEdgeRoadFacing(a, b) {
   const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   for (const r of roads) {
     if (!r) continue;
-    if (pointToSegmentDistance(mid, r.start, r.end) <= r.width / 2 + 0.5) return true;
+    const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
+    if (pointToPathDistance(mid, path) <= r.width / 2 + (r.buffer || 0) + 0.5) return true;
   }
   if (currentVertices && edgeRowsEl.children.length === currentVertices.length) {
     const { roles } = readRoleSetback();
@@ -2289,6 +2469,35 @@ function isEdgeRoadFacing(a, b) {
   return false;
 }
 
+// Small, muted side-length labels for one plot - deliberately tiny (well below the plot's own
+// "S1P2"-style number label) so a whole sub-section full of them stays readable rather than
+// turning into a wall of numbers; nudged slightly inward from each edge's own midpoint so the
+// text sits over the plot's own fill instead of straddling the boundary line with a neighbour.
+function plotSideLabelsSvg(transform, plot) {
+  const verts = plot.vertices;
+  const n = verts.length;
+  const centroid = centroidOf(verts);
+  const fontSize = plot.fill ? 5 : 6;
+  let svg = "";
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length < 1e-6) continue;
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const dx = centroid.x - mid.x, dy = centroid.y - mid.y;
+    const dlen = Math.hypot(dx, dy) || 1;
+    // A shared edge between two adjacent plots gets a label from EACH of them - nudging
+    // further inward (rather than sitting right on the line) keeps the two on visibly
+    // separate sides of that line instead of colliding into unreadable overlapping text.
+    const nudge = Math.min(dlen * 0.3, 6);
+    const labelPoint = { x: mid.x + (dx / dlen) * nudge, y: mid.y + (dy / dlen) * nudge };
+    const p = transform(labelPoint);
+    svg += `<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-size="${fontSize}" fill="#5b6169" ` +
+      `text-anchor="middle" dominant-baseline="middle">${feetToDisplay(length).toFixed(1)}${unitLabel()}</text>`;
+  }
+  return svg;
+}
+
 function drawPlotLogicPreview() {
   if (!currentVertices) {
     plotLogicSvgEl.innerHTML = "";
@@ -2299,14 +2508,9 @@ function drawPlotLogicPreview() {
   // column), which the plot-logic display would otherwise silently drop.
   const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
   let svg = baseSvg;
-  roads.forEach((r) => {
-    if (!r) return;
-    const pA = transform(r.start), pB = transform(r.end);
-    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
-      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
-  });
+  svg += internalRoadBandSvg(transform);
   subsections.forEach((s, si) => {
-    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" stroke-dasharray="6,4" />`;
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
     const c = centroidOf(s.vertices);
     const pc = transform(c);
     svg += `<text x="${pc.x.toFixed(1)}" y="${pc.y.toFixed(1)}" font-size="12" font-weight="700" fill="#2f6f4f" text-anchor="middle">S${si + 1}</text>`;
@@ -2326,20 +2530,76 @@ function drawPlotLogicPreview() {
         const ppc = transform(pcen);
         const fontSize = isFill ? 7 : 9;
         svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+        svg += plotSideLabelsSvg(transform, plot);
       }
     });
   });
   plotLogicSvgEl.innerHTML = svg;
 }
 
+// A sub-section's road-facing boundary isn't necessarily one straight edge - a curved road's
+// frontage is dozens of tiny polyline segments (the discretized arc), and every one of those
+// is individually far too short to hold even one plot. Grouping consecutive road-facing edges
+// into one continuous polyline "run" per contiguous stretch lets the backend walk plots along
+// the run's own arc length instead of getting stuck on each tiny piece separately.
+function buildFrontageRuns(verts) {
+  const n = verts.length;
+  const facing = [];
+  for (let i = 0; i < n; i++) facing.push(isEdgeRoadFacing(verts[i], verts[(i + 1) % n]));
+  if (!facing.some(Boolean)) return [];
+  // Rotate the starting point to a non-facing edge when one exists, so a run never has to
+  // wrap past the end of the array back to the start.
+  let startOffset = facing.indexOf(false);
+  if (startOffset === -1) startOffset = 0; // the whole boundary is road-facing
+
+  // A run should only continue across a vertex where the boundary keeps roughly the same
+  // direction - that's what makes a curved road's many small discretization segments
+  // correctly merge into one frontage. A genuine sharp corner (e.g. a sub-section bordering
+  // one road on one side and a different, perpendicular road on the adjacent side) must NOT
+  // be smoothed over the same way, or a single plot's frontage chord ends up cutting
+  // diagonally across the corner instead of following either real edge - exactly what
+  // produced skewed, rotated plots and slivers in an L-shaped corner block.
+  const MAX_TURN_DEG = 45;
+  function edgeDir(i) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dx / len, y: dy / len };
+  }
+  function turnAngleDeg(dirA, dirB) {
+    const dot = Math.max(-1, Math.min(1, dirA.x * dirB.x + dirA.y * dirB.y));
+    return (Math.acos(dot) * 180) / Math.PI;
+  }
+
+  const runs = [];
+  let current = null;
+  let lastDir = null;
+  for (let k = 0; k < n; k++) {
+    const i = (startOffset + k) % n;
+    if (facing[i]) {
+      const dir = edgeDir(i);
+      if (current && lastDir && turnAngleDeg(lastDir, dir) > MAX_TURN_DEG) {
+        runs.push(current);
+        current = null;
+      }
+      if (!current) current = [verts[i]];
+      current.push(verts[(i + 1) % n]);
+      lastDir = dir;
+    } else if (current) {
+      runs.push(current);
+      current = null;
+      lastDir = null;
+    }
+  }
+  if (current) runs.push(current);
+  return runs;
+}
+
 async function insertPlotsForSubsection(sub) {
   const verts = sub.vertices;
   const p = sub.params;
-  const roadFacingEdges = [];
-  for (let i = 0; i < verts.length; i++) {
-    const a = verts[i], b = verts[(i + 1) % verts.length];
-    if (isEdgeRoadFacing(a, b)) roadFacingEdges.push({ a, b });
-  }
+  const frontageRuns = buildFrontageRuns(verts);
+  const roadFacingEdges = frontageRuns.map((path) => ({ path }));
   if (roadFacingEdges.length === 0) {
     sub.plots = [];
     sub.details = { error: "No road frontage on this sub-section - add a road bordering it before inserting plots." };
@@ -2360,9 +2620,9 @@ async function insertPlotsForSubsection(sub) {
         subsection: { vertices: verts },
         roadFacingEdges,
         params: {
-          minArea: p.minArea, maxArea: p.maxArea, minGap: p.minGap,
-          roadThreshold: p.roadThreshold, minSides: p.minSides, maxSides: p.maxSides,
-          maxPlots: p.maxPlots,
+          minLength: p.minLength, maxLength: p.maxLength,
+          minWidth: p.minWidth, maxWidth: p.maxWidth,
+          minGap: p.minGap, roadThreshold: p.roadThreshold, maxPlots: p.maxPlots,
         },
       }),
     });
@@ -2439,12 +2699,12 @@ function buildSubsectionRow(sub) {
     `<h3 style="font-size:14px; margin: 0 0 8px;">Sub-section ${sub.index + 1}</h3>` +
     `<div class="row">` +
     field("Min number of plots", "sub-min-plots", 1) +
-    field(`Max plot area (${areaUnitLabel()})`, "sub-max-area", sqFeetToDisplayArea(2000).toFixed(0)) +
-    field(`Min plot area (${areaUnitLabel()})`, "sub-min-area", sqFeetToDisplayArea(1200).toFixed(0)) +
-    field("Min number of sides in a plot", "sub-min-sides", 4) +
-    field("Max number of sides in a plot", "sub-max-sides", 6) +
+    field(`Max length (${unitLabel()})`, "sub-max-length", feetToDisplay(60).toFixed(1)) +
+    field(`Min length (${unitLabel()})`, "sub-min-length", feetToDisplay(40).toFixed(1)) +
+    field(`Max width (${unitLabel()})`, "sub-max-width", feetToDisplay(50).toFixed(1)) +
+    field(`Min width (${unitLabel()})`, "sub-min-width", feetToDisplay(30).toFixed(1)) +
     `</div><div class="row" style="margin-top:8px;">` +
-    field(`Min gap between two plots (${unitLabel()})`, "sub-min-gap", feetToDisplay(1).toFixed(1)) +
+    field(`Min gap between two plots (${unitLabel()})`, "sub-min-gap", feetToDisplay(0).toFixed(1)) +
     field(`Plot roadside threshold (${unitLabel()})`, "sub-road-threshold", feetToDisplay(5).toFixed(1)) +
     `<div class="field"><label>&nbsp;</label><button type="button" class="sub-insert-btn">Insert plots</button></div>` +
     `</div>` +
@@ -2454,10 +2714,10 @@ function buildSubsectionRow(sub) {
   sub.detailsEl = div.querySelector(".sub-details");
   const readParams = () => ({
     minPlots: parseInt(div.querySelector(".sub-min-plots").value, 10) || 0,
-    maxArea: displayAreaToSqFeet(parseFloat(div.querySelector(".sub-max-area").value) || 0),
-    minArea: displayAreaToSqFeet(parseFloat(div.querySelector(".sub-min-area").value) || 0),
-    minSides: parseInt(div.querySelector(".sub-min-sides").value, 10) || 4,
-    maxSides: parseInt(div.querySelector(".sub-max-sides").value, 10) || 6,
+    maxLength: displayToFeet(parseFloat(div.querySelector(".sub-max-length").value) || 0),
+    minLength: displayToFeet(parseFloat(div.querySelector(".sub-min-length").value) || 0),
+    maxWidth: displayToFeet(parseFloat(div.querySelector(".sub-max-width").value) || 0),
+    minWidth: displayToFeet(parseFloat(div.querySelector(".sub-min-width").value) || 0),
     minGap: displayToFeet(parseFloat(div.querySelector(".sub-min-gap").value) || 0),
     roadThreshold: displayToFeet(parseFloat(div.querySelector(".sub-road-threshold").value) || 0),
     maxPlots: null,
@@ -2491,7 +2751,11 @@ finalizeRoadLogicBtn.addEventListener("click", async () => {
   try {
     const body = {
       plot: { vertices: currentVertices },
-      roads: roads.filter(Boolean).map((r) => ({ start: r.start, end: r.end, width: r.width })),
+      roads: roads.filter(Boolean).map((r) => ({
+        start: r.start, end: r.end, width: r.width, buffer: r.buffer,
+        path: r.path && r.path.length >= 2 ? r.path : [r.start, r.end],
+        capDirStart: r.startCapDir, capDirEnd: r.endCapDir,
+      })),
     };
     const res = await fetch("/compute-subsections", {
       method: "POST",
@@ -2525,14 +2789,9 @@ function drawMasterPlanPreview() {
   }
   const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
   let svg = baseSvg;
-  roads.forEach((r) => {
-    if (!r) return;
-    const pA = transform(r.start), pB = transform(r.end);
-    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
-      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
-  });
+  svg += internalRoadBandSvg(transform);
   subsections.forEach((s, si) => {
-    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" stroke-dasharray="6,4" />`;
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
     (s.plots || []).forEach((plot, pi) => {
       const isFill = plot.fill;
       const pts = polygonPoints(transform, plot.vertices);
@@ -2545,6 +2804,7 @@ function drawMasterPlanPreview() {
         const pcen = centroidOf(plot.vertices);
         const ppc = transform(pcen);
         svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${isFill ? 7 : 9}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+        svg += plotSideLabelsSvg(transform, plot);
       }
     });
   });
@@ -2612,6 +2872,20 @@ function showWizardPage(step) {
     if (pill.classList.contains("todo")) return;
     pill.classList.toggle("active", pill.dataset.step === String(step));
   });
+  // The site plot/final site plan cards and the print sheet live outside the wizard-page
+  // toggle entirely (one shared set of cards, not a duplicate per page) since the master plan
+  // is built directly on top of the same site plan, not a separate thing - shown under either
+  // of those two steps, hidden under Footprint/Floors where they don't belong yet.
+  const stepStr = String(step);
+  const showShared = stepStr === "2" || stepStr === "masterplan";
+  document.querySelectorAll(".shared-with-masterplan").forEach((el) => {
+    el.style.display = showShared ? "block" : "none";
+  });
+  // The Road logic preview used to only ever get drawn by the "Build master plan" button's
+  // own click handler (which always redrew it fresh at that moment); now that this page is
+  // reached by navigation instead, redraw it on every visit so it reflects whatever the site
+  // plan currently is - a no-op via its own currentVertices guard if nothing's computed yet.
+  if (step === "masterplan") drawRoadLogicPreview();
 }
 document.querySelectorAll(".step-nav .step-pill:not(.todo)").forEach((pill) => {
   pill.addEventListener("click", () => showWizardPage(pill.dataset.step));
@@ -2625,12 +2899,6 @@ importSiteplanBtn.addEventListener("click", () => {
 uploadSiteplanBtn.addEventListener("click", () => {
   uploadSiteplanCardEl.style.display = "block";
   footprintCardEl.style.display = "none";
-});
-
-// ---- Build master plan (road logic) ----
-buildMasterPlanBtn.addEventListener("click", () => {
-  roadLogicCardEl.style.display = "block";
-  drawRoadLogicPreview();
 });
 
 showWizardPage(2);
