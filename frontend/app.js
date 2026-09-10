@@ -306,6 +306,28 @@ const previewPdfBtn = document.getElementById("previewPdfBtn");
 const downloadPdfBtn = document.getElementById("downloadPdfBtn");
 const pdfNoteEl = document.getElementById("pdfNote");
 const pdfPreviewFrameEl = document.getElementById("pdfPreviewFrame");
+const buildMasterPlanBtn = document.getElementById("buildMasterPlanBtn");
+const roadLogicCardEl = document.getElementById("roadLogicCard");
+const addRoadBtnEl = document.getElementById("addRoadBtn");
+const roadLogicSvgEl = document.getElementById("roadLogicSvg");
+const roadRowsEl = document.getElementById("roadRows");
+const roadLogicNoteEl = document.getElementById("roadLogicNote");
+const finalizeRoadLogicBtn = document.getElementById("finalizeRoadLogicBtn");
+const finalizeRoadLogicNoteEl = document.getElementById("finalizeRoadLogicNote");
+const plotLogicCardEl = document.getElementById("plotLogicCard");
+const plotLogicSvgEl = document.getElementById("plotLogicSvg");
+const plotLogicNoteEl = document.getElementById("plotLogicNote");
+const subsectionRowsEl = document.getElementById("subsectionRows");
+const finalizeMasterPlanBtn = document.getElementById("finalizeMasterPlanBtn");
+const finalizeMasterPlanNoteEl = document.getElementById("finalizeMasterPlanNote");
+const masterPlanCardEl = document.getElementById("masterPlanCard");
+const masterPlanSvgEl = document.getElementById("masterPlanSvg");
+const masterPlanSummaryEl = document.getElementById("masterPlanSummary");
+const footprintEntryCardEl = document.getElementById("footprintEntryCard");
+const importSiteplanBtn = document.getElementById("importSiteplanBtn");
+const uploadSiteplanBtn = document.getElementById("uploadSiteplanBtn");
+const uploadSiteplanCardEl = document.getElementById("uploadSiteplanCard");
+const footprintCardEl = document.getElementById("footprintCard");
 const footprintSvgEl = document.getElementById("footprintSvg");
 const footprintPlaceholderNoteEl = document.getElementById("footprintPlaceholderNote");
 const footprintSidesCountEl = document.getElementById("footprintSidesCount");
@@ -338,6 +360,9 @@ let footprintOrientation = 0;    // which of the 4 corner-rotations of the curre
 let footprintCurrentAngles = []; // the template's own angle values - not user-editable anymore
 let currentVertices = null; // the last successfully resolved plot polygon (local coords)
 let lastBuildableAreaSqft = null;
+let roads = []; // resolved {name, type, width, start, end} for each road-logic row, in order
+let roadUidCounter = 0; // stable per-row id, independent of DOM position, so removing a road
+                         // never shifts another row's own reference value
 
 function logStatus(line, isError) {
   statusLogEl.classList.remove("empty");
@@ -681,6 +706,10 @@ function sqFeetToDisplayArea(sqft) {
   return currentUnit === "m" ? sqft / (FT_PER_M * FT_PER_M) : sqft;
 }
 
+function displayAreaToSqFeet(area) {
+  return currentUnit === "m" ? area * FT_PER_M * FT_PER_M : area;
+}
+
 function areaUnitLabel() {
   return currentUnit === "m" ? "sq m" : "sq ft";
 }
@@ -899,6 +928,15 @@ function drawPreview(plotVertices, buildableVertices) {
   if (buildableVertices && buildableVertices.length >= 3) {
     svg += `<polygon points="${polygonPoints(transform, buildableVertices)}" fill="none" stroke="#999999" stroke-width="1.5" stroke-dasharray="6,4" />`;
   }
+
+  // Any roads already laid out in Road Logic - shown here too so the site plan itself
+  // reflects the master plan, not just the Road Logic/Plot Logic cards further down.
+  (roads || []).forEach((r) => {
+    if (!r) return;
+    const pA = transform(r.start), pB = transform(r.end);
+    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
+      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
+  });
 
   svgEl.innerHTML = svg;
   updateAreaSummary(plotVertices);
@@ -1916,5 +1954,685 @@ diagonalAddBtnEl.addEventListener("click", () => {
   onDiagonalChanged();
 });
 
+// ---- Road logic (master plan): lay out internal roads before slicing lots ----
+
+function roadSideOptions() {
+  if (!currentVertices) return [];
+  const n = currentVertices.length;
+  const labels = labelsFor(n);
+  return Array.from({ length: n }, (_, i) => ({
+    value: `side:${i}`,
+    text: `Side ${labels[i]}${labels[(i + 1) % n]}`,
+  }));
+}
+
+function populateSelectOptions(selectEl, options) {
+  const previousValue = selectEl.value;
+  selectEl.innerHTML = "";
+  options.forEach(({ value, text }) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = text;
+    selectEl.appendChild(opt);
+  });
+  const stillValid = Array.from(selectEl.options).some((o) => o.value === previousValue);
+  if (stillValid) selectEl.value = previousValue;
+  else if (selectEl.options.length) selectEl.selectedIndex = 0;
+}
+
+function rowIndexForUid(uid) {
+  return Array.from(roadRowsEl.children).findIndex((row) => row.dataset.roadUid === uid);
+}
+
+function populateRoadEndpointSelect(selectEl, currentRow, includeDeadEnd) {
+  const options = roadSideOptions();
+  const rows = Array.from(roadRowsEl.children);
+  const myIndex = rows.indexOf(currentRow);
+  rows.forEach((row, i) => {
+    if (i >= myIndex) return; // only roads already added before this one are valid targets
+    const name = row.querySelector(".road-name-input").value.trim() || "Road";
+    options.push({ value: `road:${row.dataset.roadUid}`, text: `Road ${name}` });
+  });
+  if (includeDeadEnd) options.push({ value: "deadend", text: "Dead end" });
+  populateSelectOptions(selectEl, options);
+}
+
+function referenceLength(ref) {
+  // The full length of whatever a start/end dropdown currently points at - a plot side or
+  // an already-resolved road - used both to size the "distance from" field's default and to
+  // turn a distance back into an actual point.
+  if (!currentVertices) return 0;
+  const n = currentVertices.length;
+  if (ref.startsWith("side:")) {
+    const idx = parseInt(ref.split(":")[1], 10);
+    const a = currentVertices[idx], b = currentVertices[(idx + 1) % n];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  if (ref.startsWith("road:")) {
+    const uid = ref.split(":")[1];
+    const r = roads[rowIndexForUid(uid)];
+    if (!r) return 0;
+    return Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y);
+  }
+  return 0;
+}
+
+function distanceFieldLabel(ref) {
+  if (!currentVertices || !ref) return "Distance (ft)";
+  if (ref.startsWith("side:")) {
+    const idx = parseInt(ref.split(":")[1], 10);
+    const labels = labelsFor(currentVertices.length);
+    return `Distance from ${labels[idx]} (ft)`;
+  }
+  if (ref.startsWith("road:")) {
+    const uid = ref.split(":")[1];
+    const row = Array.from(roadRowsEl.children).find((r) => r.dataset.roadUid === uid);
+    const name = row ? (row.querySelector(".road-name-input").value.trim() || "Road") : "Road";
+    return `Distance from start of ${name} (ft)`;
+  }
+  return "Distance (ft)";
+}
+
+function addRoadRow() {
+  const uid = String(++roadUidCounter);
+  const index = roadRowsEl.children.length;
+  const div = document.createElement("div");
+  div.className = "road-row";
+  div.dataset.roadUid = uid;
+  div.style.cssText = "border:1px solid var(--border); border-radius:7px; padding:10px 12px; margin-top:10px;";
+  div.innerHTML =
+    `<div class="row">` +
+    `<div class="field"><label>Road name</label><input type="text" class="road-name-input" value="R${index + 1}" /></div>` +
+    `<div class="field"><label>Road type</label><select class="road-type-select">` +
+    `<option value="spine">Spine</option><option value="loop">Loop</option>` +
+    `<option value="branch">Branch</option><option value="culdesac">Cul-de-sac</option>` +
+    `</select></div>` +
+    `<div class="field"><label>Start</label><select class="road-start-select"></select></div>` +
+    `<div class="field"><label class="road-start-distance-label">Distance (ft)</label>` +
+    `<input type="number" class="road-start-distance-input" step="any" /></div>` +
+    `<div class="field"><label>End</label><select class="road-end-select"></select></div>` +
+    `<div class="field road-end-distance-field"><label class="road-end-distance-label">Distance (ft)</label>` +
+    `<input type="number" class="road-end-distance-input" step="any" /></div>` +
+    `<div class="field road-deadend-length" style="display:none;"><label>Length (ft)</label>` +
+    `<input type="number" class="road-deadend-length-input" step="any" min="0.1" value="${feetToDisplay(30).toFixed(2)}" /></div>` +
+    `<div class="field road-deadend-direction" style="display:none;"><label>Perpendicular to side</label>` +
+    `<select class="road-deadend-direction-select"></select></div>` +
+    `<div class="field"><label>Width (ft)</label><input type="number" class="road-width-input" step="any" min="0.1" value="${feetToDisplay(12).toFixed(2)}" /></div>` +
+    `<div class="field"><label>&nbsp;</label><button type="button" class="secondary road-remove-btn">Remove road</button></div>` +
+    `</div>`;
+  roadRowsEl.appendChild(div);
+
+  const nameInput = div.querySelector(".road-name-input");
+  const typeSelect = div.querySelector(".road-type-select");
+  const startSelect = div.querySelector(".road-start-select");
+  const startDistanceLabel = div.querySelector(".road-start-distance-label");
+  const startDistanceInput = div.querySelector(".road-start-distance-input");
+  const endSelect = div.querySelector(".road-end-select");
+  const endDistanceField = div.querySelector(".road-end-distance-field");
+  const endDistanceLabel = div.querySelector(".road-end-distance-label");
+  const endDistanceInput = div.querySelector(".road-end-distance-input");
+  const widthInput = div.querySelector(".road-width-input");
+  const deadendLengthField = div.querySelector(".road-deadend-length");
+  const deadendDirField = div.querySelector(".road-deadend-direction");
+  const deadendLengthInput = div.querySelector(".road-deadend-length-input");
+  const deadendDirSelect = div.querySelector(".road-deadend-direction-select");
+  const removeBtn = div.querySelector(".road-remove-btn");
+
+  populateRoadEndpointSelect(startSelect, div, false);
+  populateRoadEndpointSelect(endSelect, div, true);
+  populateSelectOptions(deadendDirSelect, roadSideOptions());
+
+  removeBtn.addEventListener("click", () => {
+    div.remove();
+    recomputeAllRoads();
+  });
+
+  function reseedStartDistance() {
+    startDistanceLabel.textContent = distanceFieldLabel(startSelect.value);
+    startDistanceInput.value = feetToDisplay(referenceLength(startSelect.value) / 2).toFixed(2);
+  }
+  function reseedEndDistance() {
+    endDistanceLabel.textContent = distanceFieldLabel(endSelect.value);
+    endDistanceInput.value = feetToDisplay(referenceLength(endSelect.value) / 2).toFixed(2);
+  }
+  function updateDeadendVisibility() {
+    const isDeadEnd = endSelect.value === "deadend";
+    deadendLengthField.style.display = isDeadEnd ? "flex" : "none";
+    deadendDirField.style.display = isDeadEnd ? "flex" : "none";
+    endDistanceField.style.display = isDeadEnd ? "none" : "flex";
+  }
+  reseedStartDistance();
+  updateDeadendVisibility();
+  if (endSelect.value !== "deadend") reseedEndDistance();
+
+  [nameInput, typeSelect, widthInput, startDistanceInput, endDistanceInput, deadendLengthInput, deadendDirSelect].forEach((el) => {
+    el.addEventListener("input", recomputeAllRoads);
+    el.addEventListener("change", recomputeAllRoads);
+  });
+  startSelect.addEventListener("change", () => {
+    reseedStartDistance();
+    recomputeAllRoads();
+  });
+  endSelect.addEventListener("change", () => {
+    updateDeadendVisibility();
+    if (endSelect.value !== "deadend") reseedEndDistance();
+    recomputeAllRoads();
+  });
+}
+
+function recomputeAllRoads() {
+  const rows = Array.from(roadRowsEl.children);
+  rows.forEach((row) => {
+    populateRoadEndpointSelect(row.querySelector(".road-start-select"), row, false);
+    populateRoadEndpointSelect(row.querySelector(".road-end-select"), row, true);
+    // Keep "Distance from X" labels in sync if an earlier road's name just changed.
+    row.querySelector(".road-start-distance-label").textContent = distanceFieldLabel(row.querySelector(".road-start-select").value);
+    const endRefNow = row.querySelector(".road-end-select").value;
+    if (endRefNow !== "deadend") {
+      row.querySelector(".road-end-distance-label").textContent = distanceFieldLabel(endRefNow);
+    }
+  });
+
+  if (!currentVertices) {
+    roads = [];
+    drawRoadLogicPreview([]);
+    return;
+  }
+
+  const n = currentVertices.length;
+  const centroid = centroidOf(currentVertices);
+  const resolved = [];
+  const errors = [];
+
+  // Turns a "distance from the reference's own start" measurement into an actual point -
+  // for a side, that's distance from its first-named vertex toward the second; for a road,
+  // distance from that road's own start point toward its own end. Extrapolates past either
+  // end if given a distance outside the reference's own length, rather than clamping.
+  function resolveRef(ref, distanceFt) {
+    if (ref.startsWith("side:")) {
+      const idx = parseInt(ref.split(":")[1], 10);
+      const a = currentVertices[idx], b = currentVertices[(idx + 1) % n];
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      const t = distanceFt / len;
+      return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+    }
+    if (ref.startsWith("road:")) {
+      const uid = ref.split(":")[1];
+      const r = resolved[rowIndexForUid(uid)];
+      if (!r) return null;
+      const len = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y) || 1;
+      const t = distanceFt / len;
+      return { x: r.start.x + t * (r.end.x - r.start.x), y: r.start.y + t * (r.end.y - r.start.y) };
+    }
+    return null;
+  }
+
+  rows.forEach((row, i) => {
+    const name = row.querySelector(".road-name-input").value.trim() || `R${i + 1}`;
+    const type = row.querySelector(".road-type-select").value;
+    const startRef = row.querySelector(".road-start-select").value;
+    const endRef = row.querySelector(".road-end-select").value;
+    const width = displayToFeet(parseFloat(row.querySelector(".road-width-input").value) || 0);
+    const startDistance = displayToFeet(parseFloat(row.querySelector(".road-start-distance-input").value) || 0);
+
+    const startPoint = resolveRef(startRef, startDistance);
+    if (!startPoint) {
+      errors.push(`${name}: can't resolve the start connection.`);
+      resolved.push(null);
+      return;
+    }
+
+    let endPoint;
+    if (endRef === "deadend") {
+      const length = displayToFeet(parseFloat(row.querySelector(".road-deadend-length-input").value) || 0);
+      const dirRef = row.querySelector(".road-deadend-direction-select").value;
+      const dirIdx = parseInt(dirRef.split(":")[1], 10);
+      const da = currentVertices[dirIdx], db = currentVertices[(dirIdx + 1) % n];
+      const edx = db.x - da.x, edy = db.y - da.y;
+      const elen = Math.hypot(edx, edy) || 1;
+      // Perpendicular to the chosen side; pick whichever of the two perpendicular
+      // directions points back toward the plot's centroid, so a dead end never shoots
+      // outside the boundary.
+      let px = -edy / elen, py = edx / elen;
+      const toward = { x: centroid.x - startPoint.x, y: centroid.y - startPoint.y };
+      if (px * toward.x + py * toward.y < 0) { px = -px; py = -py; }
+      endPoint = { x: startPoint.x + px * length, y: startPoint.y + py * length };
+    } else {
+      const endDistance = displayToFeet(parseFloat(row.querySelector(".road-end-distance-input").value) || 0);
+      endPoint = resolveRef(endRef, endDistance);
+    }
+
+    if (!endPoint) {
+      errors.push(`${name}: can't resolve the end connection.`);
+      resolved.push(null);
+      return;
+    }
+
+    resolved.push({ name, type, width, start: startPoint, end: endPoint });
+  });
+
+  roads = resolved;
+  drawRoadLogicPreview(errors);
+  drawPreview(currentVertices, lastBuildable); // keep the site plan's own preview showing roads live too
+}
+
+function drawRoadLogicPreview(errors) {
+  if (!currentVertices) {
+    roadLogicSvgEl.innerHTML = "";
+    roadLogicNoteEl.textContent = "Compute the buildable area on the Site plan page first.";
+    roadLogicNoteEl.classList.remove("closure-error");
+    return;
+  }
+  // Reuse the site plot's own renderer for the plot outline - this is what already knows how
+  // to draw the outer, boundary-edge roads (the gray bands with break lines from the Site
+  // plan page's own Role column), not just the internal roads defined here. Without this,
+  // Road Logic/Plot Logic only ever showed the bare plot outline, silently dropping any
+  // road the site plan itself already had.
+  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
+  let svg = baseSvg;
+  (roads || []).forEach((r) => {
+    if (!r) return;
+    const pA = transform(r.start), pB = transform(r.end);
+    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
+      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.65" />`;
+    const mid = { x: (pA.x + pB.x) / 2, y: (pA.y + pB.y) / 2 };
+    const length = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y);
+    svg += `<text x="${mid.x.toFixed(1)}" y="${(mid.y - 8).toFixed(1)}" font-size="11" font-weight="700" ` +
+      `fill="#7d5ba6" text-anchor="middle">${r.name} (${feetToDisplay(length).toFixed(1)} ${unitLabel()})</text>`;
+  });
+  roadLogicSvgEl.innerHTML = svg;
+
+  if (errors && errors.length) {
+    roadLogicNoteEl.textContent = errors.join(" ");
+    roadLogicNoteEl.classList.add("closure-error");
+  } else {
+    roadLogicNoteEl.textContent = roads && roads.length
+      ? `${roads.length} road(s) defined.`
+      : "No roads yet - click \"Add road\" to start.";
+    roadLogicNoteEl.classList.remove("closure-error");
+  }
+}
+
+addRoadBtnEl.addEventListener("click", () => {
+  addRoadRow();
+  recomputeAllRoads();
+});
+
+// ---- Plot logic (master plan): sub-sections left after roads, then plots within each ----
+
+let subsections = []; // {vertices, params, plots: [[{x,y}x4],...], details}
+
+function pointToSegmentDistance(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function isEdgeRoadFacing(a, b) {
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  for (const r of roads) {
+    if (!r) continue;
+    if (pointToSegmentDistance(mid, r.start, r.end) <= r.width / 2 + 0.5) return true;
+  }
+  if (currentVertices && edgeRowsEl.children.length === currentVertices.length) {
+    const { roles } = readRoleSetback();
+    const n = currentVertices.length;
+    for (let i = 0; i < n; i++) {
+      if (!isRoadRole(roles[i])) continue;
+      const pa = currentVertices[i], pb = currentVertices[(i + 1) % n];
+      if (pointToSegmentDistance(mid, pa, pb) < 0.5) return true;
+    }
+  }
+  return false;
+}
+
+function drawPlotLogicPreview() {
+  if (!currentVertices) {
+    plotLogicSvgEl.innerHTML = "";
+    return;
+  }
+  // Reuse the site plot's own renderer, same reasoning as Road Logic's preview - this is
+  // what draws the outer, boundary-edge roads (gray bands from the Site plan page's Role
+  // column), which the plot-logic display would otherwise silently drop.
+  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
+  let svg = baseSvg;
+  roads.forEach((r) => {
+    if (!r) return;
+    const pA = transform(r.start), pB = transform(r.end);
+    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
+      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
+  });
+  subsections.forEach((s, si) => {
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" stroke-dasharray="6,4" />`;
+    const c = centroidOf(s.vertices);
+    const pc = transform(c);
+    svg += `<text x="${pc.x.toFixed(1)}" y="${pc.y.toFixed(1)}" font-size="12" font-weight="700" fill="#2f6f4f" text-anchor="middle">S${si + 1}</text>`;
+    (s.plots || []).forEach((plot, pi) => {
+      const isFill = plot.fill;
+      const pts = polygonPoints(transform, plot.vertices);
+      if (isFill) {
+        svg += `<polygon points="${pts}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
+      } else {
+        svg += `<polygon points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
+      }
+      // Fill triangles can number in the dozens for an irregular sub-section - labeling every
+      // sliver clutters the display unreadably, so only label fill plots big enough for a
+      // label to actually fit (frontage plots are always labeled, there are far fewer of them).
+      if (!isFill || plot.area >= 60) {
+        const pcen = centroidOf(plot.vertices);
+        const ppc = transform(pcen);
+        const fontSize = isFill ? 7 : 9;
+        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+      }
+    });
+  });
+  plotLogicSvgEl.innerHTML = svg;
+}
+
+async function insertPlotsForSubsection(sub) {
+  const verts = sub.vertices;
+  const p = sub.params;
+  const roadFacingEdges = [];
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i + 1) % verts.length];
+    if (isEdgeRoadFacing(a, b)) roadFacingEdges.push({ a, b });
+  }
+  if (roadFacingEdges.length === 0) {
+    sub.plots = [];
+    sub.details = { error: "No road frontage on this sub-section - add a road bordering it before inserting plots." };
+    return;
+  }
+
+  // The actual plot geometry is computed server-side (shapely): rectangular/trapezoidal
+  // frontage plots are clipped against whatever land is really left (never overlapping, since
+  // each accepted plot is subtracted before the next is even tried), then everything still
+  // left over is tiled edge-to-edge with triangles via constrained Delaunay triangulation -
+  // this is real polygon math, not something worth re-implementing by hand in JS.
+  let data;
+  try {
+    const res = await fetch("/insert-plots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subsection: { vertices: verts },
+        roadFacingEdges,
+        params: {
+          minArea: p.minArea, maxArea: p.maxArea, minGap: p.minGap,
+          roadThreshold: p.roadThreshold, minSides: p.minSides, maxSides: p.maxSides,
+          maxPlots: p.maxPlots,
+        },
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    sub.plots = [];
+    sub.details = { error: `Network/parse error: ${err}` };
+    return;
+  }
+  if (!data.success) {
+    sub.plots = [];
+    sub.details = { error: `[${data.stage || "error"}] ${data.error}` };
+    return;
+  }
+
+  const plots = data.plots; // [{vertices, area, sides, fill}, ...]
+  const frontagePlots = plots.filter((pl) => !pl.fill);
+  const totalPlotArea = plots.reduce((s, pl) => s + pl.area, 0);
+  const subArea = data.subsectionArea;
+  const areas = plots.map((pl) => pl.area);
+  const biggestIdx = areas.length ? areas.indexOf(Math.max(...areas)) : -1;
+  const smallestIdx = areas.length ? areas.indexOf(Math.min(...areas)) : -1;
+
+  sub.plots = plots;
+  sub.details = {
+    count: plots.length,
+    frontageCount: frontagePlots.length,
+    fillCount: plots.length - frontagePlots.length,
+    usedArea: totalPlotArea,
+    wastedArea: Math.max(0, subArea - totalPlotArea),
+    subArea,
+    biggestLabel: biggestIdx >= 0 ? `S${sub.index + 1}P${biggestIdx + 1}` : null,
+    biggestArea: biggestIdx >= 0 ? areas[biggestIdx] : null,
+    smallestLabel: smallestIdx >= 0 ? `S${sub.index + 1}P${smallestIdx + 1}` : null,
+    smallestArea: smallestIdx >= 0 ? areas[smallestIdx] : null,
+    belowMin: p.minPlots && frontagePlots.length < p.minPlots,
+  };
+}
+
+function renderSubsectionDetails(sub) {
+  const el = sub.detailsEl;
+  const au = areaUnitLabel();
+  if (!sub.details) {
+    el.textContent = "";
+    return;
+  }
+  if (sub.details.error) {
+    el.textContent = sub.details.error;
+    el.classList.add("closure-error");
+    return;
+  }
+  el.classList.remove("closure-error");
+  const lines = [
+    `${sub.details.frontageCount} plot(s) placed (+ ${sub.details.fillCount} corner-fill triangle(s), dotted).`,
+    `Used: ${sqFeetToDisplayArea(sub.details.usedArea).toFixed(1)} ${au} / Sub-section: ${sqFeetToDisplayArea(sub.details.subArea).toFixed(1)} ${au}`,
+    `Wasted: ${sqFeetToDisplayArea(sub.details.wastedArea).toFixed(1)} ${au}`,
+  ];
+  if (sub.details.biggestLabel) {
+    lines.push(`Biggest: ${sub.details.biggestLabel} (${sqFeetToDisplayArea(sub.details.biggestArea).toFixed(1)} ${au})`);
+    lines.push(`Smallest: ${sub.details.smallestLabel} (${sqFeetToDisplayArea(sub.details.smallestArea).toFixed(1)} ${au})`);
+  }
+  if (sub.details.belowMin) {
+    lines.push(`Below the requested minimum plot count - try a smaller target area or a smaller gap.`);
+  }
+  el.innerHTML = lines.join("<br/>");
+}
+
+function buildSubsectionRow(sub) {
+  const div = document.createElement("div");
+  div.className = "road-row"; // reuse the same bordered-card look as a road row
+  const field = (label, cls, value) =>
+    `<div class="field"><label>${label}</label><input type="number" class="${cls}" step="any" min="0" value="${value}" /></div>`;
+  div.innerHTML =
+    `<h3 style="font-size:14px; margin: 0 0 8px;">Sub-section ${sub.index + 1}</h3>` +
+    `<div class="row">` +
+    field("Min number of plots", "sub-min-plots", 1) +
+    field(`Max plot area (${areaUnitLabel()})`, "sub-max-area", sqFeetToDisplayArea(2000).toFixed(0)) +
+    field(`Min plot area (${areaUnitLabel()})`, "sub-min-area", sqFeetToDisplayArea(1200).toFixed(0)) +
+    field("Min number of sides in a plot", "sub-min-sides", 4) +
+    field("Max number of sides in a plot", "sub-max-sides", 6) +
+    `</div><div class="row" style="margin-top:8px;">` +
+    field(`Min gap between two plots (${unitLabel()})`, "sub-min-gap", feetToDisplay(1).toFixed(1)) +
+    field(`Plot roadside threshold (${unitLabel()})`, "sub-road-threshold", feetToDisplay(5).toFixed(1)) +
+    `<div class="field"><label>&nbsp;</label><button type="button" class="sub-insert-btn">Insert plots</button></div>` +
+    `</div>` +
+    `<p class="hint sub-details" style="margin-top:8px;"></p>`;
+  subsectionRowsEl.appendChild(div);
+
+  sub.detailsEl = div.querySelector(".sub-details");
+  const readParams = () => ({
+    minPlots: parseInt(div.querySelector(".sub-min-plots").value, 10) || 0,
+    maxArea: displayAreaToSqFeet(parseFloat(div.querySelector(".sub-max-area").value) || 0),
+    minArea: displayAreaToSqFeet(parseFloat(div.querySelector(".sub-min-area").value) || 0),
+    minSides: parseInt(div.querySelector(".sub-min-sides").value, 10) || 4,
+    maxSides: parseInt(div.querySelector(".sub-max-sides").value, 10) || 6,
+    minGap: displayToFeet(parseFloat(div.querySelector(".sub-min-gap").value) || 0),
+    roadThreshold: displayToFeet(parseFloat(div.querySelector(".sub-road-threshold").value) || 0),
+    maxPlots: null,
+  });
+
+  div.querySelector(".sub-insert-btn").addEventListener("click", async () => {
+    sub.params = readParams();
+    const btn = div.querySelector(".sub-insert-btn");
+    btn.disabled = true;
+    sub.detailsEl.textContent = "Computing...";
+    sub.detailsEl.classList.remove("closure-error");
+    try {
+      await insertPlotsForSubsection(sub);
+    } finally {
+      btn.disabled = false;
+    }
+    renderSubsectionDetails(sub);
+    drawPlotLogicPreview();
+  });
+}
+
+finalizeRoadLogicBtn.addEventListener("click", async () => {
+  if (!currentVertices) {
+    finalizeRoadLogicNoteEl.textContent = "Compute the buildable area on the Site plan page first.";
+    finalizeRoadLogicNoteEl.classList.add("closure-error");
+    return;
+  }
+  finalizeRoadLogicBtn.disabled = true;
+  finalizeRoadLogicNoteEl.textContent = "Computing sub-sections...";
+  finalizeRoadLogicNoteEl.classList.remove("closure-error");
+  try {
+    const body = {
+      plot: { vertices: currentVertices },
+      roads: roads.filter(Boolean).map((r) => ({ start: r.start, end: r.end, width: r.width })),
+    };
+    const res = await fetch("/compute-subsections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.success) {
+      finalizeRoadLogicNoteEl.textContent = `[${data.stage || "error"}] ${data.error}`;
+      finalizeRoadLogicNoteEl.classList.add("closure-error");
+      return;
+    }
+    subsections = data.subsections.map((s, i) => ({ vertices: s.vertices, index: i, params: null, plots: [], details: null, detailsEl: null }));
+    subsectionRowsEl.innerHTML = "";
+    subsections.forEach((sub) => buildSubsectionRow(sub));
+    finalizeRoadLogicNoteEl.textContent = `${subsections.length} sub-section(s) found.`;
+    plotLogicCardEl.style.display = "block";
+    drawPlotLogicPreview();
+  } catch (err) {
+    finalizeRoadLogicNoteEl.textContent = `Network/parse error: ${err}`;
+    finalizeRoadLogicNoteEl.classList.add("closure-error");
+  } finally {
+    finalizeRoadLogicBtn.disabled = false;
+  }
+});
+
+function drawMasterPlanPreview() {
+  if (!currentVertices) {
+    masterPlanSvgEl.innerHTML = "";
+    return;
+  }
+  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
+  let svg = baseSvg;
+  roads.forEach((r) => {
+    if (!r) return;
+    const pA = transform(r.start), pB = transform(r.end);
+    svg += `<line x1="${pA.x.toFixed(1)}" y1="${pA.y.toFixed(1)}" x2="${pB.x.toFixed(1)}" y2="${pB.y.toFixed(1)}" ` +
+      `stroke="#7d5ba6" stroke-width="5" stroke-linecap="round" opacity="0.55" />`;
+  });
+  subsections.forEach((s, si) => {
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" stroke-dasharray="6,4" />`;
+    (s.plots || []).forEach((plot, pi) => {
+      const isFill = plot.fill;
+      const pts = polygonPoints(transform, plot.vertices);
+      if (isFill) {
+        svg += `<polygon points="${pts}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
+      } else {
+        svg += `<polygon points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
+      }
+      if (!isFill || plot.area >= 60) {
+        const pcen = centroidOf(plot.vertices);
+        const ppc = transform(pcen);
+        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${isFill ? 7 : 9}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+      }
+    });
+  });
+  masterPlanSvgEl.innerHTML = svg;
+}
+
+// Locks in a clean, combined presentation of every sub-section's plots together, plus totals
+// across the whole master plan - the plot-logic equivalent of the site plan's own "Finalise
+// site plan" step. Requires every sub-section to have had "Insert plots" run at least once,
+// since finalizing before that would just present an empty/partial plan as if it were done.
+finalizeMasterPlanBtn.addEventListener("click", () => {
+  if (!subsections.length) {
+    finalizeMasterPlanNoteEl.textContent = "Finalize road logic first so there are sub-sections to fill.";
+    finalizeMasterPlanNoteEl.classList.add("closure-error");
+    return;
+  }
+  const notReady = subsections.filter((s) => !s.details || s.details.error);
+  if (notReady.length) {
+    finalizeMasterPlanNoteEl.textContent =
+      `Insert plots for every sub-section first - Sub-section ${notReady.map((s) => s.index + 1).join(", ")} ` +
+      `${notReady.length > 1 ? "haven't" : "hasn't"} been filled yet.`;
+    finalizeMasterPlanNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  finalizeMasterPlanNoteEl.textContent = "";
+  finalizeMasterPlanNoteEl.classList.remove("closure-error");
+  drawMasterPlanPreview();
+
+  let totalFrontage = 0, totalFill = 0, totalUsed = 0, totalWasted = 0, totalSubArea = 0;
+  let biggest = null, smallest = null;
+  subsections.forEach((s) => {
+    totalFrontage += s.details.frontageCount || 0;
+    totalFill += s.details.fillCount || 0;
+    totalUsed += s.details.usedArea || 0;
+    totalWasted += s.details.wastedArea || 0;
+    totalSubArea += s.details.subArea || 0;
+    (s.plots || []).forEach((plot, pi) => {
+      const entry = { label: `S${s.index + 1}P${pi + 1}`, area: plot.area, fill: plot.fill };
+      if (!biggest || entry.area > biggest.area) biggest = entry;
+      if (!smallest || entry.area < smallest.area) smallest = entry;
+    });
+  });
+
+  const au = areaUnitLabel();
+  const lines = [
+    `<strong>${subsections.length}</strong> sub-section(s), <strong>${totalFrontage}</strong> road-facing plot(s) + <strong>${totalFill}</strong> corner-fill triangle(s).`,
+    `Used: ${sqFeetToDisplayArea(totalUsed).toFixed(1)} ${au} / Master plan land: ${sqFeetToDisplayArea(totalSubArea).toFixed(1)} ${au}`,
+    `Wasted: ${sqFeetToDisplayArea(totalWasted).toFixed(1)} ${au}`,
+  ];
+  if (biggest) lines.push(`Biggest plot: ${biggest.label}${biggest.fill ? " (fill)" : ""} (${sqFeetToDisplayArea(biggest.area).toFixed(1)} ${au})`);
+  if (smallest) lines.push(`Smallest plot: ${smallest.label}${smallest.fill ? " (fill)" : ""} (${sqFeetToDisplayArea(smallest.area).toFixed(1)} ${au})`);
+  masterPlanSummaryEl.innerHTML = lines.join("<br/>");
+  masterPlanSummaryEl.style.display = "block";
+  masterPlanCardEl.style.display = "block";
+  masterPlanCardEl.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+// ---- Wizard page navigation (step-nav pills) ----
+function showWizardPage(step) {
+  document.querySelectorAll(".wizard-page").forEach((el) => {
+    el.style.display = el.id === `wizardPage${step}` ? "block" : "none";
+  });
+  document.querySelectorAll(".step-nav .step-pill").forEach((pill) => {
+    if (pill.classList.contains("todo")) return;
+    pill.classList.toggle("active", pill.dataset.step === String(step));
+  });
+}
+document.querySelectorAll(".step-nav .step-pill:not(.todo)").forEach((pill) => {
+  pill.addEventListener("click", () => showWizardPage(pill.dataset.step));
+});
+
+// ---- Footprint page: choose the site-plan source ----
+importSiteplanBtn.addEventListener("click", () => {
+  footprintCardEl.style.display = "block";
+  uploadSiteplanCardEl.style.display = "none";
+});
+uploadSiteplanBtn.addEventListener("click", () => {
+  uploadSiteplanCardEl.style.display = "block";
+  footprintCardEl.style.display = "none";
+});
+
+// ---- Build master plan (road logic) ----
+buildMasterPlanBtn.addEventListener("click", () => {
+  roadLogicCardEl.style.display = "block";
+  drawRoadLogicPreview();
+});
+
+showWizardPage(2);
 updateUnitLabels();
 buildEdgeRows();

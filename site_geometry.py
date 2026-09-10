@@ -18,8 +18,10 @@ Functions:
 """
 import math
 
+import shapely
 from shapely.geometry import Polygon, LineString
 from shapely.validation import make_valid
+from shapely.ops import unary_union
 
 
 class SiteGeometryError(ValueError):
@@ -354,3 +356,251 @@ def bounding_rect_hint(vertices, samples=80):
 
     _, x0, y0, x1, y1 = best
     return {"x": round(x0, 3), "y": round(y0, 3), "width": round(x1 - x0, 3), "height": round(y1 - y0, 3)}
+
+
+def compute_subsections(plot_vertices, roads):
+    """
+    Subtracts every road's own width-buffered strip from the master plot polygon, returning
+    whatever land is left as one or more "sub-section" polygons - the blocks that plots later
+    get sliced out of in the plot-logic stage. `roads` is a list of
+    {"start": {"x":.., "y":..}, "end": {"x":.., "y":..}, "width": ft}.
+
+    Road strips use FLAT (not rounded) end caps, so a road doesn't eat into land past its own
+    given endpoint - a dead end really does end exactly where its length says it does.
+
+    Each strip is extended by a tiny epsilon past both of its own endpoints before the
+    subtraction. A road that runs corner-to-corner or side-to-side has an endpoint sitting
+    EXACTLY on the plot's own boundary; subtracting a strip whose edge is exactly coincident
+    with the container's boundary is a classic exact-arithmetic degenerate case for GEOS,
+    which can return one "pinched" polygon (both halves joined by a zero-width bridge)
+    instead of cleanly splitting it into two. Overshooting very slightly guarantees the cut
+    actually passes through the boundary rather than just touching it.
+    """
+    EPSILON_FT = 0.1
+
+    plot = Polygon(_polygon_from_vertices(plot_vertices))
+    if not plot.is_valid:
+        plot = make_valid(plot)
+
+    strips = []
+    for road in roads:
+        start = (road["start"]["x"], road["start"]["y"])
+        end = (road["end"]["x"], road["end"]["y"])
+        width = float(road.get("width", 0))
+        if width <= 0:
+            continue
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if length < 1e-6:
+            continue
+        ux, uy = (end[0] - start[0]) / length, (end[1] - start[1]) / length
+        ext_start = (start[0] - ux * EPSILON_FT, start[1] - uy * EPSILON_FT)
+        ext_end = (end[0] + ux * EPSILON_FT, end[1] + uy * EPSILON_FT)
+        line = LineString([ext_start, ext_end])
+        strips.append(line.buffer(width / 2.0, cap_style=2))  # cap_style 2 = flat
+
+    remaining = plot
+    if strips:
+        roads_union = unary_union(strips)
+        remaining = plot.difference(roads_union)
+        if not remaining.is_valid:
+            remaining = make_valid(remaining)
+
+    if remaining.is_empty:
+        return []
+
+    if hasattr(remaining, "geoms"):
+        polygons = [g for g in remaining.geoms if g.geom_type == "Polygon" and not g.is_empty and g.area > 1e-6]
+    elif remaining.geom_type == "Polygon" and not remaining.is_empty:
+        polygons = [remaining]
+    else:
+        polygons = []
+
+    subsections = []
+    for poly in polygons:
+        coords = list(poly.exterior.coords)[:-1]  # drop the repeated closing point
+        subsections.append([{"x": round(x, 4), "y": round(y, 4)} for x, y in coords])
+    return subsections
+
+
+def _polygon_to_vertex_list(poly):
+    coords = list(poly.exterior.coords)[:-1]
+    return [{"x": round(x, 4), "y": round(y, 4)} for x, y in coords]
+
+
+def _largest_polygon(geom):
+    """Reduce a Polygon/MultiPolygon/GeometryCollection result to its single largest Polygon
+    component, or None if it has no polygonal area at all (a sliver that collapsed to a line
+    or point)."""
+    if geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom
+    if hasattr(geom, "geoms"):
+        polys = [g for g in geom.geoms if g.geom_type == "Polygon" and not g.is_empty and g.area > 1e-9]
+        if not polys:
+            return None
+        return max(polys, key=lambda g: g.area)
+    return None
+
+
+def insert_plots(subsection_vertices, road_facing_edges, params):
+    """
+    Fills a sub-section polygon with plots: rectangular/trapezoidal plots along every
+    road-facing edge first (real polygon math, not fixed-size stamping - each candidate is
+    clipped against whatever land is ACTUALLY still left, via shapely intersection, so a
+    plot near a taper naturally comes out as a trapezoid instead of an ill-fitting rectangle,
+    and overlap between plots is structurally impossible since each accepted plot is
+    immediately subtracted from the remaining land before the next one is even considered).
+    Whatever land is left after every frontage edge has had a pass filled is not wasted -
+    it's tiled edge-to-edge with a constrained Delaunay triangulation (shapely, respects the
+    remaining shape's own concave boundary exactly), so corners and tapers a rectangle could
+    never reach are covered by small triangular plots instead of counted as waste.
+
+    road_facing_edges: list of {"a": {x,y}, "b": {x,y}} - which of the sub-section's own
+        boundary edges actually border a road (that determination - checking both internal
+        roads and the master plot's own Role-tagged edges - is already made client-side, so
+        this function just takes the resulting edge list rather than re-deriving it).
+    params: {
+        "minArea", "maxArea"  (sq ft) - target range for a frontage plot; the midpoint is the
+            aim size, and depth adapts downward per-slot toward whatever still clears minArea.
+        "minGap"   (ft) - fixed spacing between adjacent frontage plots along an edge.
+        "roadThreshold" (ft) - minimum length of a plot's own road-facing side.
+        "minSides" (int) - a frontage candidate whose actual clipped shape has fewer sides
+            than this is rejected as a distinct plot and left for the triangulation fill pass
+            instead (this is what keeps, e.g., a sliver triangle from being reported as one of
+            the "real" frontage plots when minSides is 4).
+        "maxSides" (int) - a clipped shape with more vertices than this is likewise rejected
+            (shrinking depth is tried first in case a shallower cut has fewer sides).
+        "maxPlots" (int or falsy) - optional hard cap on frontage plot count.
+    }
+
+    Returns:
+        {
+            "plots": [{"vertices": [...], "area": sqft, "sides": n, "fill": bool}, ...],
+            "subsectionArea": sqft,
+        }
+        `fill: false` entries are road-touching frontage plots (rectangle/trapezoid/pentagon
+        depending on how the boundary clipped them); `fill: true` entries are the triangular
+        fill plots with no frontage requirement, meant to be drawn with a dashed/dotted
+        outline so they read visually as "corner fill" rather than a standard plot.
+    """
+    sub_poly = Polygon(_polygon_from_vertices(subsection_vertices))
+    if not sub_poly.is_valid:
+        sub_poly = make_valid(sub_poly)
+    sub_poly = _largest_polygon(sub_poly) or sub_poly
+    subsection_area = sub_poly.area
+    centroid = sub_poly.centroid
+
+    min_area = float(params.get("minArea", 0))
+    max_area = float(params.get("maxArea", 0))
+    gap = max(0.0, float(params.get("minGap", 0)))
+    road_threshold = max(0.0, float(params.get("roadThreshold", 0)))
+    min_sides = int(params.get("minSides", 3) or 3)
+    max_sides = int(params.get("maxSides", 6) or 6)
+    max_plots = params.get("maxPlots") or None
+
+    target_area = (min_area + max_area) / 2.0 if (min_area and max_area) else max(min_area, max_area, 100.0)
+    aspect = 1.2
+    width = math.sqrt(target_area / aspect) if target_area > 0 else 0
+    if width < road_threshold:
+        width = road_threshold
+    depth = (target_area / width) if width > 0 else 0
+    min_depth = (min_area / width) if (width > 0 and min_area > 0) else depth * 0.2
+
+    remaining = sub_poly
+    frontage_plots = []
+
+    edges = []
+    for e in road_facing_edges or []:
+        a, b = e.get("a"), e.get("b")
+        if not a or not b:
+            continue
+        length = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        if length < 1e-6:
+            continue
+        edges.append({"a": a, "b": b, "len": length})
+    edges.sort(key=lambda e: -e["len"])
+
+    for edge in edges:
+        if max_plots and len(frontage_plots) >= max_plots:
+            break
+        if remaining is None or remaining.is_empty or width <= 0:
+            continue
+        ax, ay, bx, by = edge["a"]["x"], edge["a"]["y"], edge["b"]["x"], edge["b"]["y"]
+        length = edge["len"]
+        ux, uy = (bx - ax) / length, (by - ay) / length
+        nx, ny = -uy, ux
+        mid_x, mid_y = (ax + bx) / 2.0, (ay + by) / 2.0
+        toward_x, toward_y = centroid.x - mid_x, centroid.y - mid_y
+        if nx * toward_x + ny * toward_y < 0:
+            nx, ny = -nx, -ny
+
+        pos = 0.0
+        while pos + width <= length + 1e-6:
+            if max_plots and len(frontage_plots) >= max_plots:
+                break
+            x0, y0 = ax + ux * pos, ay + uy * pos
+            x1, y1 = ax + ux * (pos + width), ay + uy * (pos + width)
+
+            accepted = None
+            steps = 12
+            for i in range(steps + 1):
+                d = depth - ((depth - min_depth) * i / steps)
+                if d < min_depth - 1e-6 or d <= 0:
+                    break
+                rect = Polygon([
+                    (x0, y0), (x1, y1),
+                    (x1 + nx * d, y1 + ny * d), (x0 + nx * d, y0 + ny * d),
+                ])
+                if not rect.is_valid:
+                    rect = make_valid(rect)
+                candidate = _largest_polygon(rect.intersection(remaining))
+                if candidate is None:
+                    continue
+                area = candidate.area
+                if area < min_area - 1e-6:
+                    continue
+                sides = len(list(candidate.exterior.coords)) - 1
+                if sides < min_sides or sides > max_sides:
+                    continue
+                accepted = candidate
+                break
+
+            if accepted is not None:
+                frontage_plots.append({
+                    "vertices": _polygon_to_vertex_list(accepted),
+                    "area": round(accepted.area, 2),
+                    "sides": len(list(accepted.exterior.coords)) - 1,
+                    "fill": False,
+                })
+                remaining = remaining.difference(accepted)
+                if not remaining.is_valid:
+                    remaining = make_valid(remaining)
+                remaining = _largest_polygon(remaining) if remaining.geom_type == "Polygon" else remaining
+
+            pos += width + gap
+
+    fill_plots = []
+    if remaining is not None and not remaining.is_empty:
+        remaining_polys = (
+            [g for g in remaining.geoms if g.geom_type == "Polygon" and g.area > 1e-6]
+            if hasattr(remaining, "geoms") else
+            ([remaining] if remaining.geom_type == "Polygon" and remaining.area > 1e-6 else [])
+        )
+        for poly in remaining_polys:
+            tris = shapely.constrained_delaunay_triangles(poly)
+            tri_geoms = tris.geoms if hasattr(tris, "geoms") else [tris]
+            for tri in tri_geoms:
+                if tri.geom_type != "Polygon" or tri.area < 0.5:
+                    continue
+                fill_plots.append({
+                    "vertices": _polygon_to_vertex_list(tri),
+                    "area": round(tri.area, 2),
+                    "sides": len(list(tri.exterior.coords)) - 1,
+                    "fill": True,
+                })
+
+    return {
+        "plots": frontage_plots + fill_plots,
+        "subsectionArea": round(subsection_area, 2),
+    }

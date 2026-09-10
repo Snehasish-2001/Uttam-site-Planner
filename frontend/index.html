@@ -9,16 +9,17 @@
 <body>
 <header>
   <h1>Uttam Site Planner <span class="badge">Beta</span></h1>
-  <p>A guided, page-by-page wizard for a plot of any shape - rectangular, trapezoidal, or a concave/L-shaped site. This beta currently covers the Site Plan step; the rest of the wizard is coming soon.</p>
+  <p>A guided, page-by-page wizard for a plot of any shape - rectangular, trapezoidal, or a concave/L-shaped site. This beta currently covers the Site Plan and Footprint steps; the rest of the wizard is coming soon.</p>
   <div class="step-nav">
     <span class="step-pill todo" data-step="1">1. Project &amp; legal - coming soon</span>
     <span class="step-pill active" data-step="2">2. Site plan</span>
-    <span class="step-pill todo" data-step="3">3. Footprint - coming soon</span>
+    <span class="step-pill" data-step="3">3. Footprint</span>
     <span class="step-pill todo" data-step="4">4. Floors &amp; rooms - coming soon</span>
   </div>
 </header>
 
 <main>
+<div class="wizard-page" id="wizardPage2">
   <section class="card">
     <h2>Site plot - metes and bounds</h2>
     <p class="hint">
@@ -101,6 +102,7 @@
       <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area (server-computed)</span>
       <span><span class="swatch" style="border-color:#c0392b; border-top-style:dotted;"></span>Diagonal</span>
       <span><span class="swatch" style="border-color:#8d949e; border-top-width:8px;"></span>Road (width as entered, extended with a break line)</span>
+      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Master plan road (from Road logic)</span>
     </div>
 
     <div class="row" style="margin-top: 14px;">
@@ -262,13 +264,118 @@
     </div>
 
     <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="buildMasterPlanBtn" type="button" class="secondary">Build master plan</button>
+    </div>
   </section>
 
-  <section class="card" id="footprintCard">
+  <section class="card" id="roadLogicCard" style="display:none;">
+    <h2>Road logic</h2>
+    <p class="hint">
+      Lay out the internal road network you'll carve this plot into smaller lots along - each
+      road connects to an existing plot side, an already-placed road, or ends as a dead end.
+      This defines the roads only; slicing the resulting blocks into individual lots comes
+      after this.
+    </p>
+
+    <div class="site-preview">
+      <svg id="roadLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
+    </div>
+
+    <p class="hint" id="roadLogicNote">No roads yet - click "Add road" to start.</p>
+
+    <div id="roadRows"></div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="addRoadBtn" type="button" class="secondary">+ Add road</button>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="finalizeRoadLogicBtn" type="button">Finalize road logic</button>
+      <span id="finalizeRoadLogicNote" class="hint" style="margin: 0;"></span>
+    </div>
+  </section>
+
+  <section class="card" id="plotLogicCard" style="display:none;">
+    <h2>Plot logic</h2>
+    <p class="hint">
+      The finalized roads divide the plot into sub-sections - set target plot size, count, and
+      spacing per sub-section, then insert plots into each one.
+    </p>
+
+    <div class="site-preview">
+      <svg id="plotLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
+      <span><span class="swatch" style="border-color:#2f6f4f; border-top-style:dashed;"></span>Sub-section</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
+    </div>
+    <p class="hint" id="plotLogicNote"></p>
+
+    <div id="subsectionRows"></div>
+
+    <div class="row" style="margin-top: 14px;">
+      <button id="finalizeMasterPlanBtn" type="button">Finalize master plan</button>
+      <span id="finalizeMasterPlanNote" class="hint" style="margin: 0;"></span>
+    </div>
+  </section>
+
+  <section class="card" id="masterPlanCard" style="display:none;">
+    <h2>Final master plan</h2>
+    <p class="hint">
+      A clean, locked presentation view of the whole master plan - every sub-section's plots
+      (frontage plots and corner-fill triangles) together in one drawing, with the totals below.
+    </p>
+    <div class="site-preview">
+      <svg id="masterPlanSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
+      <span><span class="swatch" style="border-color:#2f6f4f; border-top-style:dashed;"></span>Sub-section</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
+    </div>
+    <div id="masterPlanSummary" class="result-box" style="display:none;"></div>
+  </section>
+
+</div>
+<div class="wizard-page" id="wizardPage3" style="display:none;">
+  <section class="card" id="footprintEntryCard">
+    <h2>Site plan source</h2>
+    <p class="hint">
+      Bring in the plot this footprint should sit inside of, either from the site plan you
+      already built or from an uploaded drawing.
+    </p>
+    <div class="row">
+      <button id="importSiteplanBtn" type="button">Import site-plan from Site Planner</button>
+      <button id="uploadSiteplanBtn" type="button" class="secondary">Upload site-plan</button>
+    </div>
+  </section>
+
+  <section class="card" id="uploadSiteplanCard" style="display:none;">
+    <h2>Upload site-plan</h2>
+    <p class="hint">
+      Image-based site-plan extraction isn't built yet - this is a placeholder for a future
+      update. Choose "Import site-plan from Site Planner" above to continue building a
+      footprint today.
+    </p>
+    <div class="row">
+      <input type="file" id="uploadSiteplanInput" accept="image/*" disabled />
+    </div>
+  </section>
+
+  <section class="card" id="footprintCard" style="display:none;">
     <h2>Building footprint</h2>
     <p class="hint">
       Draw the outer wall line of the building itself, sitting inside the buildable area
-      already computed above. Pick how many sides you need and a ready-made shape (rectangle,
+      computed on the Site plan page. Pick how many sides you need and a ready-made shape (rectangle,
       L, T, or plus) is generated to fit - click <strong>Change shape</strong> to spin the
       notch(es) to a different corner instead of hand-picking 90&deg;/270&deg; corners
       yourself, which almost never lands on a shape that actually closes. Adjust individual
@@ -359,18 +466,22 @@
     <div id="footprintAreaSummary" class="result-box" style="display:none;"></div>
     <div id="footprintErrorBox" class="error-box" style="display:none;"></div>
   </section>
+</div>
 
+<div id="wizardPageNotes">
   <section class="card">
     <h2>What's next</h2>
     <p class="hint">
-      This page proves out the arbitrary-shape site-plot math end to end (the client-side
-      preview below is a live, pure-JS sketch of the boundary; "Compute buildable area" calls
-      the authoritative server-side <code>/compute-site</code> endpoint, which is what
-      actually gets stored), plus a first pass at the building footprint above using the same
-      metes-and-bounds idea with square (90&deg;/270&deg;) corners. Project/legal info and
+      The Site plan page proves out the arbitrary-shape site-plot math end to end (the
+      client-side preview is a live, pure-JS sketch of the boundary; "Compute buildable area"
+      calls the authoritative server-side <code>/compute-site</code> endpoint, which is what
+      actually gets stored). The Footprint page adds a first pass at the building footprint
+      using the same metes-and-bounds idea with square (90&deg;/270&deg;) corners, plus an
+      irregular/diagonal mode for non-rectilinear footprints. Project/legal info and
       floors/rooms are still being built.
     </p>
   </section>
+</div>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>

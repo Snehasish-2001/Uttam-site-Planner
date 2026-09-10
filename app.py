@@ -43,7 +43,9 @@ from layout_geometry import LayoutError, floor_label, floor_offsets
 from site_geometry import (
     SiteGeometryError,
     bounding_rect_hint,
+    compute_subsections,
     containment_violations,
+    insert_plots,
     offset_polygon_edges,
     polygon_contains,
     regular_polygon_angles,
@@ -234,6 +236,98 @@ async def compute_footprint(request: Request):
             "contained": contained,
             "violation_area_sqft": round(violation_area, 2),
         }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "stage": "pipeline",
+            "error": f"Unexpected error: {exc}",
+            "detail": traceback.format_exc(),
+        }
+
+
+@app.post("/compute-subsections")
+async def compute_subsections_endpoint(request: Request):
+    """Master plot vertices + the finalized road network -> the sub-section polygons left
+    over once every road's own width is carved out. `body` must have 'plot': {vertices:[...]}
+    and 'roads': [{start:{x,y}, end:{x,y}, width}, ...]. This is the authoritative,
+    shapely-backed polygon subtraction the plot-logic stage builds on - carving road strips
+    out of an arbitrary (possibly concave) plot by hand in JS would be far more error-prone."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        plot = body.get("plot")
+        plot_vertices = plot.get("vertices") if isinstance(plot, dict) else None
+        if not isinstance(plot_vertices, list) or len(plot_vertices) < 3:
+            return {
+                "success": False,
+                "stage": "site_geometry",
+                "error": "Expected 'plot': {vertices: [...]} - the resolved plot polygon from /compute-site.",
+            }
+
+        roads = body.get("roads")
+        if not isinstance(roads, list):
+            return {"success": False, "stage": "site_geometry", "error": "Expected a 'roads' list."}
+
+        try:
+            subsections = compute_subsections(plot_vertices, roads)
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry", "error": f"Subsection computation failed: {exc}"}
+
+        return {
+            "success": True,
+            "subsections": [{"vertices": verts} for verts in subsections],
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "stage": "pipeline",
+            "error": f"Unexpected error: {exc}",
+            "detail": traceback.format_exc(),
+        }
+
+
+@app.post("/insert-plots")
+async def insert_plots_endpoint(request: Request):
+    """One sub-section polygon + which of its edges actually face a road + sizing params ->
+    the plots that fill it: rectangular/trapezoidal frontage plots first (clipped against
+    real remaining land via shapely, not stamped at a fixed size), then whatever's left over
+    tiled edge-to-edge with triangles via constrained Delaunay triangulation, so nothing in
+    the sub-section goes unaccounted for as "waste" that a rectangle-only approach would have
+    left in the corners. `body` must have 'subsection': {vertices:[...]}, 'roadFacingEdges':
+    [{a:{x,y}, b:{x,y}}, ...], and 'params': {minArea, maxArea, minGap, roadThreshold,
+    minSides, maxSides, maxPlots}."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        sub = body.get("subsection")
+        sub_vertices = sub.get("vertices") if isinstance(sub, dict) else None
+        if not isinstance(sub_vertices, list) or len(sub_vertices) < 3:
+            return {
+                "success": False,
+                "stage": "site_geometry",
+                "error": "Expected 'subsection': {vertices: [...]} - one polygon from /compute-subsections.",
+            }
+
+        road_facing_edges = body.get("roadFacingEdges")
+        if not isinstance(road_facing_edges, list):
+            return {"success": False, "stage": "site_geometry", "error": "Expected a 'roadFacingEdges' list."}
+
+        params = body.get("params")
+        if not isinstance(params, dict):
+            return {"success": False, "stage": "site_geometry", "error": "Expected a 'params' object."}
+
+        try:
+            result = insert_plots(sub_vertices, road_facing_edges, params)
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry", "error": f"Plot insertion failed: {exc}"}
+
+        return {"success": True, **result}
 
     except Exception as exc:
         return {
