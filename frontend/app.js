@@ -321,6 +321,31 @@ const finalizeMasterPlanNoteEl = document.getElementById("finalizeMasterPlanNote
 const masterPlanCardEl = document.getElementById("masterPlanCard");
 const masterPlanSvgEl = document.getElementById("masterPlanSvg");
 const masterPlanSummaryEl = document.getElementById("masterPlanSummary");
+const finalizePlotLogicBtn = document.getElementById("finalizePlotLogicBtn");
+const finalizePlotLogicNoteEl = document.getElementById("finalizePlotLogicNote");
+const plotEditorCardEl = document.getElementById("plotEditorCard");
+const plotEditorSvgEl = document.getElementById("plotEditorSvg");
+const addPlotInputEl = document.getElementById("addPlotInput");
+const addPlotBtnEl = document.getElementById("addPlotBtn");
+const addPlotNoteEl = document.getElementById("addPlotNote");
+const plotNameInputEl = document.getElementById("plotNameInput");
+const plotNameNoteEl = document.getElementById("plotNameNote");
+const plotEditFieldsEl = document.getElementById("plotEditFields");
+const plotSidesCountEl = document.getElementById("plotSidesCount");
+const plotEdgeRowsEl = document.getElementById("plotEdgeRows");
+const plotDiagonalsNoteEl = document.getElementById("plotDiagonalsNote");
+const plotDiagonalsTableEl = document.getElementById("plotDiagonalsTable");
+const plotDiagonalRowsEl = document.getElementById("plotDiagonalRows");
+const addPlotDiagonalBtnEl = document.getElementById("addPlotDiagonalBtn");
+const plotAreaNoteEl = document.getElementById("plotAreaNote");
+const plotAreaMinusBtnEl = document.getElementById("plotAreaMinusBtn");
+const plotAreaPlusBtnEl = document.getElementById("plotAreaPlusBtn");
+const plotAreaValueEl = document.getElementById("plotAreaValue");
+const plotAreaStepNoteEl = document.getElementById("plotAreaStepNote");
+const pushEdgeSelectEl = document.getElementById("pushEdgeSelect");
+const resetPlotBtnEl = document.getElementById("resetPlotBtn");
+const savePlotBtnEl = document.getElementById("savePlotBtn");
+const savePlotNoteEl = document.getElementById("savePlotNote");
 const footprintEntryCardEl = document.getElementById("footprintEntryCard");
 const importSiteplanBtn = document.getElementById("importSiteplanBtn");
 const uploadSiteplanBtn = document.getElementById("uploadSiteplanBtn");
@@ -2498,6 +2523,67 @@ function plotSideLabelsSvg(transform, plot) {
   return svg;
 }
 
+// A sub-section's own side lengths, small font, nudged OUTWARD (away from its centroid) rather
+// than inward like plotSideLabelsSvg - inward would land right on top of the frontage plots'
+// own edge labels, which already crowd the inside of every sub-section right along this same
+// boundary. Outward puts it in the road strip (or just past the outer plot boundary) instead,
+// which is clear space in every layout this app produces.
+function subsectionSideLabelsSvg(transform, sub) {
+  const verts = sub.vertices;
+  const n = verts.length;
+  const centroid = centroidOf(verts);
+  let svg = "";
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length < 1e-6) continue;
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const dx = mid.x - centroid.x, dy = mid.y - centroid.y;
+    const dlen = Math.hypot(dx, dy) || 1;
+    const nudge = Math.min(dlen * 0.12, 9);
+    const labelPoint = { x: mid.x + (dx / dlen) * nudge, y: mid.y + (dy / dlen) * nudge };
+    const p = transform(labelPoint);
+    svg += `<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-size="6.5" font-weight="600" fill="#2f6f4f" ` +
+      `text-anchor="middle" dominant-baseline="middle">${feetToDisplay(length).toFixed(1)}${unitLabel()}</text>`;
+  }
+  return svg;
+}
+
+// Internal (Road Logic) roads' width, small font, at each road's own midpoint - Road Logic's
+// own preview already spells out name/length/width/buffer in full; here it's just the width,
+// since that's the one dimension relevant to reading a sub-section's own available frontage.
+function internalRoadWidthLabelsSvg(transform) {
+  let svg = "";
+  (roads || []).forEach((r) => {
+    if (!r) return;
+    const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
+    const mid = transform(path[Math.floor(path.length / 2)]);
+    svg += `<text x="${mid.x.toFixed(1)}" y="${mid.y.toFixed(1)}" font-size="6.5" font-weight="600" ` +
+      `fill="#5b3a8a" text-anchor="middle" dominant-baseline="middle">${feetToDisplay(r.width).toFixed(1)}${unitLabel()} wide</text>`;
+  });
+  return svg;
+}
+
+// Leftover land that failed the fill quality gate (too small, too sharp, too thin, too
+// elongated to be a plot anyone could build on). It is drawn hatched and left unnamed
+// precisely so it doesn't read as a plot - the old behaviour of triangulating every scrap
+// into a named "plot" is what produced 1 sq ft, 0.16-degree needles.
+const OPEN_SPACE_HATCH_ID = "openSpaceHatch";
+
+function openSpaceDefsSvg() {
+  return `<defs><pattern id="${OPEN_SPACE_HATCH_ID}" width="6" height="6" ` +
+    `patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
+    `<line x1="0" y1="0" x2="0" y2="6" stroke="#9aa1ac" stroke-width="1.2" /></pattern></defs>`;
+}
+
+function openSpaceSvg(transform, sub) {
+  return (sub.openSpace || []).map((piece) =>
+    `<polygon points="${polygonPoints(transform, piece.vertices)}" ` +
+    `fill="url(#${OPEN_SPACE_HATCH_ID})" fill-opacity="0.55" stroke="#9aa1ac" ` +
+    `stroke-width="0.8" stroke-dasharray="2,2" />`
+  ).join("");
+}
+
 function drawPlotLogicPreview() {
   if (!currentVertices) {
     plotLogicSvgEl.innerHTML = "";
@@ -2507,13 +2593,16 @@ function drawPlotLogicPreview() {
   // what draws the outer, boundary-edge roads (gray bands from the Site plan page's Role
   // column), which the plot-logic display would otherwise silently drop.
   const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
-  let svg = baseSvg;
+  let svg = openSpaceDefsSvg() + baseSvg;
   svg += internalRoadBandSvg(transform);
+  svg += internalRoadWidthLabelsSvg(transform);
   subsections.forEach((s, si) => {
     svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
     const c = centroidOf(s.vertices);
     const pc = transform(c);
     svg += `<text x="${pc.x.toFixed(1)}" y="${pc.y.toFixed(1)}" font-size="12" font-weight="700" fill="#2f6f4f" text-anchor="middle">S${si + 1}</text>`;
+    svg += subsectionSideLabelsSvg(transform, s);
+    svg += openSpaceSvg(transform, s);
     (s.plots || []).forEach((plot, pi) => {
       const isFill = plot.fill;
       const pts = polygonPoints(transform, plot.vertices);
@@ -2529,7 +2618,7 @@ function drawPlotLogicPreview() {
         const pcen = centroidOf(plot.vertices);
         const ppc = transform(pcen);
         const fontSize = isFill ? 7 : 9;
-        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="#1f2430" text-anchor="middle">${plot.name || `S${si + 1}P${pi + 1}`}</text>`;
         svg += plotSideLabelsSvg(transform, plot);
       }
     });
@@ -2639,8 +2728,12 @@ async function insertPlotsForSubsection(sub) {
   }
 
   const plots = data.plots; // [{vertices, area, sides, fill}, ...]
+  nameSubsectionPlots(sub, plots);
+  sub.openSpace = data.openSpace || [];
+  sub.invariantErrors = data.invariantErrors || [];
   const frontagePlots = plots.filter((pl) => !pl.fill);
   const totalPlotArea = plots.reduce((s, pl) => s + pl.area, 0);
+  const openArea = (sub.openSpace || []).reduce((s, o) => s + o.area, 0);
   const subArea = data.subsectionArea;
   const areas = plots.map((pl) => pl.area);
   const biggestIdx = areas.length ? areas.indexOf(Math.max(...areas)) : -1;
@@ -2652,13 +2745,73 @@ async function insertPlotsForSubsection(sub) {
     frontageCount: frontagePlots.length,
     fillCount: plots.length - frontagePlots.length,
     usedArea: totalPlotArea,
-    wastedArea: Math.max(0, subArea - totalPlotArea),
+    openArea,
     subArea,
-    biggestLabel: biggestIdx >= 0 ? `S${sub.index + 1}P${biggestIdx + 1}` : null,
+    biggestLabel: biggestIdx >= 0 ? plots[biggestIdx].name : null,
     biggestArea: biggestIdx >= 0 ? areas[biggestIdx] : null,
-    smallestLabel: smallestIdx >= 0 ? `S${sub.index + 1}P${smallestIdx + 1}` : null,
+    smallestLabel: smallestIdx >= 0 ? plots[smallestIdx].name : null,
     smallestArea: smallestIdx >= 0 ? areas[smallestIdx] : null,
     belowMin: p.minPlots && frontagePlots.length < p.minPlots,
+    invariantErrors: sub.invariantErrors,
+    // Only shown when zero real (road-facing) plots were placed at all - with a partial
+    // success elsewhere in the sub-section, one tapering corner failing on its own is usually
+    // expected behaviour, not something to alarm the user with on every insert.
+    generationNotes: frontagePlots.length === 0 ? (data.generationNotes || []) : [],
+  };
+}
+
+// Real plots keep a permanent S{sub}P{n} name, assigned once, so the plot editor can keep
+// referring to one even after its neighbours change. Fill plots are a derived view of the
+// residual - thrown away and rebuilt whenever a real plot moves - so they get their own
+// S{sub}F{n} sequence that is simply renumbered on every regeneration and can never collide
+// with a real plot's name.
+function nameSubsectionPlots(sub, plots) {
+  let realNo = 0;
+  let fillNo = 0;
+  plots.forEach((pl) => {
+    if (pl.fill) {
+      fillNo += 1;
+      pl.name = `S${sub.index + 1}F${fillNo}`;
+    } else {
+      realNo += 1;
+      pl.name = `S${sub.index + 1}P${realNo}`;
+    }
+  });
+  return plots;
+}
+
+// Replace a sub-section's derived fill + open space, keeping every real plot exactly as it is.
+function applyRegeneratedFill(sub, fillPlots, openSpace) {
+  const realPlots = (sub.plots || []).filter((pl) => !pl.fill);
+  (fillPlots || []).forEach((pl) => { pl.fill = true; });
+  sub.plots = realPlots.concat(fillPlots || []);
+  sub.openSpace = openSpace || [];
+  nameSubsectionPlots(sub, sub.plots);
+  if (sub.details) {
+    const plots = sub.plots;
+    const areas = plots.map((pl) => pl.area);
+    const biggestIdx = areas.length ? areas.indexOf(Math.max(...areas)) : -1;
+    const smallestIdx = areas.length ? areas.indexOf(Math.min(...areas)) : -1;
+    sub.details.count = plots.length;
+    sub.details.frontageCount = realPlots.length;
+    sub.details.fillCount = plots.length - realPlots.length;
+    sub.details.usedArea = areas.reduce((s, a) => s + a, 0);
+    sub.details.openArea = sub.openSpace.reduce((s, o) => s + o.area, 0);
+    sub.details.biggestLabel = biggestIdx >= 0 ? plots[biggestIdx].name : null;
+    sub.details.biggestArea = biggestIdx >= 0 ? areas[biggestIdx] : null;
+    sub.details.smallestLabel = smallestIdx >= 0 ? plots[smallestIdx].name : null;
+    sub.details.smallestArea = smallestIdx >= 0 ? areas[smallestIdx] : null;
+  }
+}
+
+// The server-side params object for one sub-section, shared by /insert-plots, /resize-plot
+// and /regenerate-fill so all three agree on the sizing rules.
+function subsectionParams(sub) {
+  const p = sub.params || {};
+  return {
+    minLength: p.minLength, maxLength: p.maxLength,
+    minWidth: p.minWidth, maxWidth: p.maxWidth,
+    minGap: p.minGap, roadThreshold: p.roadThreshold, maxPlots: p.maxPlots,
   };
 }
 
@@ -2676,9 +2829,9 @@ function renderSubsectionDetails(sub) {
   }
   el.classList.remove("closure-error");
   const lines = [
-    `${sub.details.frontageCount} plot(s) placed (+ ${sub.details.fillCount} corner-fill triangle(s), dotted).`,
+    `${sub.details.frontageCount} plot(s) placed (+ ${sub.details.fillCount} fill plot(s), dotted).`,
     `Used: ${sqFeetToDisplayArea(sub.details.usedArea).toFixed(1)} ${au} / Sub-section: ${sqFeetToDisplayArea(sub.details.subArea).toFixed(1)} ${au}`,
-    `Wasted: ${sqFeetToDisplayArea(sub.details.wastedArea).toFixed(1)} ${au}`,
+    `Open space: ${sqFeetToDisplayArea(sub.details.openArea || 0).toFixed(1)} ${au}`,
   ];
   if (sub.details.biggestLabel) {
     lines.push(`Biggest: ${sub.details.biggestLabel} (${sqFeetToDisplayArea(sub.details.biggestArea).toFixed(1)} ${au})`);
@@ -2687,6 +2840,15 @@ function renderSubsectionDetails(sub) {
   if (sub.details.belowMin) {
     lines.push(`Below the requested minimum plot count - try a smaller target area or a smaller gap.`);
   }
+  if (sub.details.frontageCount === 0 && (sub.details.generationNotes || []).length) {
+    lines.push(`<span class="closure-error">No road-facing plots could be placed here:</span>`);
+    sub.details.generationNotes.forEach((note) => {
+      lines.push(`<span class="closure-error">&middot; ${note}.</span>`);
+    });
+  }
+  (sub.details.invariantErrors || []).forEach((problem) => {
+    lines.push(`<span class="closure-error">Geometry check: ${problem}</span>`);
+  });
   el.innerHTML = lines.join("<br/>");
 }
 
@@ -2788,10 +2950,11 @@ function drawMasterPlanPreview() {
     return;
   }
   const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
-  let svg = baseSvg;
+  let svg = openSpaceDefsSvg() + baseSvg;
   svg += internalRoadBandSvg(transform);
   subsections.forEach((s, si) => {
     svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
+    svg += openSpaceSvg(transform, s);
     (s.plots || []).forEach((plot, pi) => {
       const isFill = plot.fill;
       const pts = polygonPoints(transform, plot.vertices);
@@ -2803,13 +2966,849 @@ function drawMasterPlanPreview() {
       if (!isFill || plot.area >= 60) {
         const pcen = centroidOf(plot.vertices);
         const ppc = transform(pcen);
-        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${isFill ? 7 : 9}" font-weight="600" fill="#1f2430" text-anchor="middle">S${si + 1}P${pi + 1}</text>`;
+        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${isFill ? 7 : 9}" font-weight="600" fill="#1f2430" text-anchor="middle">${plot.name || `S${si + 1}P${pi + 1}`}</text>`;
         svg += plotSideLabelsSvg(transform, plot);
       }
     });
   });
   masterPlanSvgEl.innerHTML = svg;
 }
+
+// ---- Plot editor: load one real plot by name and reshape it - by pushing one of its own
+// edges (the area stepper) or by editing its sides/diagonals - with nothing else in the master
+// plan allowed to move. Only committed on "Save plot". ----
+//
+// INDEPENDENT PLOTS. A real plot only ever grows into free residual land and only ever gives
+// land back to the residual; no edit may move, reshape or re-save any OTHER real plot. Fill
+// plots are not objects that can be edited at all - they are a derived view of
+// `sub-section - union(real plots)` and get rebuilt from scratch by the server whenever a real
+// plot changes. The previous model, where an edit dragged every plot sharing a corner along
+// with it, is what let one plot's growth push a neighbour into a third plot.
+
+let plotEditSession = null;
+// {
+//   subIndex, plotIndex, name,
+//   originalVertices, workingVertices,      // both [{x,y}, ...], same length, sides frozen
+//   anchorPos, anchorHeadingRad,             // where/how solveFromDiagonalGraph's local-space
+//                                            // result gets placed back into real coordinates
+//   frontageEdges,                           // indices of edges lying on a road - never pushable
+//   pushEdgeIndex,                           // null = let the server pick (rear, then sides)
+// }
+
+function findFillPlotByName(name) {
+  const target = name.trim().toUpperCase();
+  if (!target) return null;
+  for (let si = 0; si < subsections.length; si++) {
+    const plots = subsections[si].plots || [];
+    for (let pi = 0; pi < plots.length; pi++) {
+      const p = plots[pi];
+      if (p.fill && p.name && p.name.toUpperCase() === target) {
+        return { subIndex: si, plotIndex: pi, plot: p };
+      }
+    }
+  }
+  return null;
+}
+
+// "Add plot": promote one or more fill plots (S{sub}F{n} - a derived leftover piece with no
+// road frontage) into real plots. A promoted plot keeps its exact shape - it's already valid
+// land, just reclassified - and gets the next chronological S{sub}P{n} name in its own
+// sub-section, same as any other real plot. Several names (space/comma separated) can be
+// promoted in one go, including from different sub-sections at once.
+addPlotBtnEl.addEventListener("click", async () => {
+  const raw = addPlotInputEl.value.trim();
+  if (!raw) return;
+  const names = raw.split(/[\s,]+/).filter(Boolean);
+
+  const promoted = [];   // {subIndex, requestedName, plot}
+  const notFound = [];
+  const alreadyReal = [];
+  names.forEach((rawName) => {
+    if (findRealPlotByName(rawName)) {
+      alreadyReal.push(rawName);
+      return;
+    }
+    const found = findFillPlotByName(rawName);
+    if (!found) {
+      notFound.push(rawName);
+      return;
+    }
+    found.plot.fill = false; // stays at its current position in sub.plots - see nameSubsectionPlots
+    promoted.push({ subIndex: found.subIndex, requestedName: rawName, plot: found.plot });
+  });
+
+  if (!promoted.length) {
+    addPlotNoteEl.textContent =
+      (notFound.length ? `No fill plot found for: ${notFound.join(", ")}. ` : "") +
+      (alreadyReal.length ? `Already a real plot: ${alreadyReal.join(", ")}.` : "");
+    addPlotNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  addPlotNoteEl.textContent = "Adding...";
+  addPlotNoteEl.classList.remove("closure-error");
+
+  // Regenerate fill/open space for every affected sub-section - the promoted piece's land no
+  // longer belongs to the residual, and this also assigns its real chronological name (fill
+  // and real plots are both renumbered from their final array order, see nameSubsectionPlots).
+  const affectedSubs = [...new Set(promoted.map((p) => p.subIndex))];
+  const failed = [];
+  for (const si of affectedSubs) {
+    const sub = subsections[si];
+    let data;
+    try {
+      const res = await fetch("/regenerate-fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subsection: { vertices: sub.vertices },
+          plots: sub.plots.map((pl) => ({ name: pl.name, fill: !!pl.fill, vertices: pl.vertices })),
+          params: subsectionParams(sub),
+        }),
+      });
+      data = await res.json();
+    } catch (err) {
+      failed.push(`S${si + 1}: network/parse error: ${err}`);
+      continue;
+    }
+    if (!data.success || (data.invariantErrors || []).length) {
+      // Roll back this sub-section's promotions rather than leave it in a half-applied state.
+      promoted.filter((p) => p.subIndex === si).forEach((p) => { p.plot.fill = true; });
+      failed.push(`S${si + 1}: ${data.error || (data.invariantErrors || [])[0] || "rejected"}`);
+      continue;
+    }
+    applyRegeneratedFill(sub, data.fill, data.openSpace);
+    renderSubsectionDetails(sub);
+  }
+
+  if (failed.length) {
+    addPlotNoteEl.textContent = `Could not add plot(s): ${failed.join("; ")}.`;
+    addPlotNoteEl.classList.add("closure-error");
+  } else {
+    addPlotNoteEl.textContent = `Added ${promoted.length} plot(s).` +
+      (notFound.length ? ` Not found: ${notFound.join(", ")}.` : "") +
+      (alreadyReal.length ? ` Already real: ${alreadyReal.join(", ")}.` : "");
+    addPlotNoteEl.classList.remove("closure-error");
+    addPlotInputEl.value = "";
+  }
+  drawPlotLogicPreview();
+  if (plotEditSession) drawPlotEditorPreview();
+});
+
+function findRealPlotByName(name) {
+  const target = name.trim().toUpperCase();
+  if (!target) return null;
+  for (let si = 0; si < subsections.length; si++) {
+    const plots = subsections[si].plots || [];
+    for (let pi = 0; pi < plots.length; pi++) {
+      const p = plots[pi];
+      if (!p.fill && p.name && p.name.toUpperCase() === target) {
+        return { subIndex: si, plotIndex: pi, plot: p };
+      }
+    }
+  }
+  return null;
+}
+
+function plotEdgeLengths(vertices) {
+  const n = vertices.length;
+  const lengths = [];
+  for (let i = 0; i < n; i++) {
+    const a = vertices[i], b = vertices[(i + 1) % n];
+    lengths.push(Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  return lengths;
+}
+
+function plotDiagonalSeedLength(fromIndex, toIndex) {
+  const verts = plotEditSession.workingVertices;
+  if (verts[fromIndex] && verts[toIndex]) {
+    const a = verts[fromIndex], b = verts[toIndex];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return displayToFeet(20);
+}
+
+function addPlotDiagonalRow(defaultFrom, defaultTo) {
+  const n = plotEditSession.workingVertices.length;
+  const labels = labelsFor(n).map((l) => `${l}'`);
+  const tr = document.createElement("tr");
+
+  const fromTd = document.createElement("td");
+  const fromSelect = document.createElement("select");
+  fromSelect.className = "plot-diagonal-from-select";
+  populateDiagonalSelect(fromSelect, n, labels, new Set());
+  fromSelect.value = String(defaultFrom);
+  fromTd.appendChild(fromSelect);
+  tr.appendChild(fromTd);
+
+  const toTd = document.createElement("td");
+  const toSelect = document.createElement("select");
+  toSelect.className = "plot-diagonal-to-select";
+  toTd.appendChild(toSelect);
+  tr.appendChild(toTd);
+  populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, defaultFrom));
+  if (defaultTo !== null && !validDiagonalTargets(n, defaultFrom).has(defaultTo)) {
+    toSelect.value = String(defaultTo);
+  }
+
+  const inputTd = document.createElement("td");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "any";
+  input.min = "0.01";
+  input.className = "plot-diagonal-input";
+  input.value = feetToDisplay(plotDiagonalSeedLength(parseInt(fromSelect.value, 10), parseInt(toSelect.value, 10))).toFixed(2);
+  inputTd.appendChild(input);
+  tr.appendChild(inputTd);
+
+  const reseed = () => {
+    input.value = feetToDisplay(plotDiagonalSeedLength(parseInt(fromSelect.value, 10), parseInt(toSelect.value, 10))).toFixed(2);
+  };
+  fromSelect.addEventListener("change", () => {
+    populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, parseInt(fromSelect.value, 10)));
+    reseed();
+    onPlotFieldChanged();
+  });
+  toSelect.addEventListener("change", () => {
+    reseed();
+    onPlotFieldChanged();
+  });
+  input.addEventListener("input", onPlotFieldChanged);
+  input.addEventListener("change", onPlotFieldChanged);
+
+  plotDiagonalRowsEl.appendChild(tr);
+}
+
+function readPlotLengths() {
+  return Array.from(plotEdgeRowsEl.querySelectorAll("tr")).map(
+    (r) => displayToFeet(parseFloat(r.querySelector(".plot-length-input").value) || 0)
+  );
+}
+
+function readPlotDiagonalSpecs() {
+  return Array.from(plotDiagonalRowsEl.querySelectorAll("tr")).map((tr) => ({
+    from: parseInt(tr.querySelector(".plot-diagonal-from-select").value, 10),
+    to: parseInt(tr.querySelector(".plot-diagonal-to-select").value, 10),
+    length: displayToFeet(parseFloat(tr.querySelector(".plot-diagonal-input").value) || 0),
+  }));
+}
+
+function updatePlotAreaNote() {
+  const area = polygonArea(plotEditSession.workingVertices);
+  const areaText = `${sqFeetToDisplayArea(area).toFixed(1)} ${areaUnitLabel()}`;
+  plotAreaNoteEl.textContent = `Current area: ${areaText}`;
+  plotAreaValueEl.textContent = areaText;
+}
+
+function buildPlotEditFields() {
+  const session = plotEditSession;
+  const n = session.workingVertices.length;
+  const labels = labelsFor(n).map((l) => `${l}'`);
+
+  plotSidesCountEl.value = n;
+
+  plotEdgeRowsEl.innerHTML = "";
+  const lengths = plotEdgeLengths(session.workingVertices);
+  for (let i = 0; i < n; i++) {
+    const tr = document.createElement("tr");
+    const edgeTd = document.createElement("td");
+    edgeTd.textContent = `${labels[i]}-${labels[(i + 1) % n]}`;
+    tr.appendChild(edgeTd);
+    const lengthTd = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "any";
+    input.min = "0.01";
+    input.className = "plot-length-input";
+    input.value = feetToDisplay(lengths[i]).toFixed(2);
+    input.addEventListener("input", onPlotFieldChanged);
+    input.addEventListener("change", onPlotFieldChanged);
+    lengthTd.appendChild(input);
+    tr.appendChild(lengthTd);
+    plotEdgeRowsEl.appendChild(tr);
+  }
+
+  plotDiagonalRowsEl.innerHTML = "";
+  const count = diagonalCount(n);
+  if (count === 0) {
+    plotDiagonalsTableEl.style.display = "none";
+    addPlotDiagonalBtnEl.style.display = "none";
+    plotDiagonalsNoteEl.textContent = "None needed - 3 sides alone fully determine a triangle.";
+  } else {
+    plotDiagonalsNoteEl.textContent =
+      `${count} diagonal(s) needed to fully determine this ${n}-sided shape - seeded below from ` +
+      `corner A', matching the plot's current shape.`;
+    plotDiagonalsTableEl.style.display = "table";
+    addPlotDiagonalBtnEl.style.display = "inline-block";
+    for (let k = 2; k <= n - 2; k++) {
+      addPlotDiagonalRow(0, k);
+    }
+  }
+
+  updatePlotAreaNote();
+  plotAreaStepNoteEl.textContent = "";
+  plotAreaStepNoteEl.classList.remove("closure-error");
+}
+
+// Client-side safety net before anything is committed: does this shape cut into the interior
+// of another REAL plot in the same sub-section? Sharing a boundary with a neighbour is normal
+// adjacency; actually overlapping it is not. Fill plots are ignored here on purpose - they are
+// a derived view of the residual and get rebuilt around whatever the real plots end up being.
+// Returns the colliding plot's name, or null.
+function editWouldCauseUnrelatedOverlap(session, newVerts) {
+  const plots = subsections[session.subIndex].plots || [];
+  for (let oi = 0; oi < plots.length; oi++) {
+    if (oi === session.plotIndex || plots[oi].fill) continue;
+    if (polygonsOverlap(newVerts, plots[oi].vertices)) return plots[oi].name || `plot #${oi + 1}`;
+  }
+  return null;
+}
+
+// Re-solves the edited plot's shape from its current edge/diagonal field values and places the
+// result back into real coordinates, anchored at the plot's own original first corner and first
+// edge heading (so a plot doesn't drift or spin away just because one side length changed).
+//
+// Nothing else moves. Under the independent-plots model a manual edit may not drag a corner of
+// any other real plot along with it, so if the solved shape collides with a neighbour or leaves
+// the sub-section it is simply refused - the last valid shape stays on screen with an inline
+// error naming what it hit, the same closure-failure UX the Site plan page already uses.
+function recomputeWorkingVertices() {
+  const session = plotEditSession;
+  const lengths = readPlotLengths();
+  const diagonalSpecs = readPlotDiagonalSpecs();
+  const result = solveFromDiagonalGraph(lengths, diagonalSpecs);
+  if (!result.ok) {
+    plotNameNoteEl.textContent = result.error;
+    plotNameNoteEl.classList.add("closure-error");
+    return false; // session.workingVertices untouched - last valid shape stays shown
+  }
+  // solveFromDiagonalGraph works in its own local frame and picks one of the two circle-
+  // intersection branches at each step, so the shape it returns can come back mirrored
+  // relative to the plot as stored (the plots the backend emits are all wound CCW). Anchoring
+  // a mirrored solution at the same corner and heading flips the plot across its own first
+  // edge - which put S1P1's far corners at x=233 instead of x=167, outside the sub-section, so
+  // every manual edit was refused no matter how small. Match the winding before placing it.
+  const flip = (signedArea(session.originalVertices) >= 0) === (signedArea(result.vertices) >= 0) ? 1 : -1;
+  const cosA = Math.cos(session.anchorHeadingRad), sinA = Math.sin(session.anchorHeadingRad);
+  const newVerts = result.vertices.map((p) => ({
+    x: session.anchorPos.x + p.x * cosA - flip * p.y * sinA,
+    y: session.anchorPos.y + p.x * sinA + flip * p.y * cosA,
+  }));
+
+  const editedSubVerts = subsections[session.subIndex].vertices;
+  if (polygonArea(newVerts) < 1 || polygonSelfIntersects(newVerts)) {
+    plotNameNoteEl.textContent =
+      `That would make ${session.name}'s own shape invalid (self-intersecting or collapsed) - the edit wasn't applied.`;
+    plotNameNoteEl.classList.add("closure-error");
+    return false;
+  }
+  if (!plotStaysInsideSubsection(newVerts, editedSubVerts)) {
+    plotNameNoteEl.textContent =
+      `That would push ${session.name} past its sub-section boundary (into a road or the next ` +
+      `block) - the edit wasn't applied.`;
+    plotNameNoteEl.classList.add("closure-error");
+    return false;
+  }
+  const hit = editWouldCauseUnrelatedOverlap(session, newVerts);
+  if (hit) {
+    plotNameNoteEl.textContent =
+      `That would make ${session.name} overlap ${hit} - the edit wasn't applied. A plot can only ` +
+      `grow into free land, never into another plot.`;
+    plotNameNoteEl.classList.add("closure-error");
+    return false;
+  }
+
+  session.workingVertices = newVerts;
+  plotNameNoteEl.textContent = `Editing ${session.name}.`;
+  plotNameNoteEl.classList.remove("closure-error");
+  return true;
+}
+
+function onPlotFieldChanged() {
+  if (!plotEditSession) return;
+  recomputeWorkingVertices();
+  updatePlotAreaNote();
+  plotAreaStepNoteEl.textContent = "";
+  plotAreaStepNoteEl.classList.remove("closure-error");
+  drawPlotEditorPreview();
+}
+
+// ---- Area stepper: parametric edge push, resolved server-side ----
+//
+// Growing or shrinking a plot means translating ONE of its own non-frontage edges along that
+// edge's outward normal and re-intersecting it with its two neighbours, which keeps the side
+// count fixed, slides its corners ALONG the sub-section boundary rather than through it, and
+// never touches another plot. The previous client-side model moved corners diagonally along a
+// bisector, so any corner sitting on the sub-section boundary was immediately pushed outside it
+// and the whole edit was refused - which is why "maxed out" kept appearing with free land in
+// plain view. The real polygon work (bisection for the largest feasible push, the invariant
+// checks, and regenerating the fill/open space around the result) lives in site_geometry.py.
+
+const AREA_PUSH_STEP_FT = 2.0;
+
+// Rewrites the existing edge/diagonal input fields' values to match the plot's current working
+// shape, without rebuilding the rows themselves - used after a live area push so the length
+// values on screen track the new size, same as the user would see from a manual edit.
+function syncPlotFieldValuesFromWorkingVertices() {
+  const session = plotEditSession;
+  const lengths = plotEdgeLengths(session.workingVertices);
+  Array.from(plotEdgeRowsEl.querySelectorAll("tr")).forEach((tr, i) => {
+    const input = tr.querySelector(".plot-length-input");
+    if (input && lengths[i] !== undefined) input.value = feetToDisplay(lengths[i]).toFixed(2);
+  });
+  Array.from(plotDiagonalRowsEl.querySelectorAll("tr")).forEach((tr) => {
+    const from = parseInt(tr.querySelector(".plot-diagonal-from-select").value, 10);
+    const to = parseInt(tr.querySelector(".plot-diagonal-to-select").value, 10);
+    const a = session.workingVertices[from], b = session.workingVertices[to];
+    if (a && b) {
+      tr.querySelector(".plot-diagonal-input").value = feetToDisplay(Math.hypot(b.x - a.x, b.y - a.y)).toFixed(2);
+    }
+  });
+}
+
+function plotEditRoadFacingEdges() {
+  const sub = subsections[plotEditSession.subIndex];
+  return buildFrontageRuns(sub.vertices).map((path) => ({ path }));
+}
+
+// Which of the loaded plot's edges lie on a road - the ones the server will refuse to push,
+// mirrored here only so the "Push edge" dropdown doesn't offer them.
+function plotFrontageEdgeIndices(verts, sub) {
+  const runs = buildFrontageRuns(sub.vertices);
+  const hits = [];
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i + 1) % verts.length];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const onRoad = runs.some((path) => {
+      for (let k = 0; k < path.length - 1; k++) {
+        if (distancePointToSegment(mid, path[k], path[k + 1]) <= 0.75) return true;
+      }
+      return false;
+    });
+    if (onRoad) hits.push(i);
+  }
+  return hits;
+}
+
+function buildPushEdgeOptions() {
+  const session = plotEditSession;
+  if (!session || !pushEdgeSelectEl) return;
+  const verts = session.workingVertices;
+  const labels = labelsFor(verts.length).map((l) => `${l}'`);
+  pushEdgeSelectEl.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto (rear, then sides)";
+  pushEdgeSelectEl.appendChild(auto);
+  for (let i = 0; i < verts.length; i++) {
+    if (session.frontageEdges.includes(i)) continue; // a road frontage never moves
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${labels[i]}-${labels[(i + 1) % verts.length]}`;
+    pushEdgeSelectEl.appendChild(opt);
+  }
+  pushEdgeSelectEl.value = session.pushEdgeIndex === null ? "" : String(session.pushEdgeIndex);
+}
+
+async function stepPlotArea(direction) {
+  const session = plotEditSession;
+  if (!session) return;
+  const sub = subsections[session.subIndex];
+  plotAreaStepNoteEl.textContent = direction === "grow" ? "Growing..." : "Shrinking...";
+  plotAreaStepNoteEl.classList.remove("closure-error");
+
+  let data;
+  try {
+    const res = await fetch("/resize-plot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subsection: { vertices: sub.vertices },
+        roadFacingEdges: plotEditRoadFacingEdges(),
+        // The edited plot is sent with its live working shape so repeated clicks compound,
+        // while every other plot is sent exactly as committed - the server may only move the
+        // named one.
+        plots: (sub.plots || []).map((pl, pi) => ({
+          name: pl.name,
+          fill: !!pl.fill,
+          vertices: pi === session.plotIndex ? session.workingVertices : pl.vertices,
+        })),
+        plotName: session.name,
+        params: subsectionParams(sub),
+        direction,
+        stepFt: AREA_PUSH_STEP_FT,
+        edgeIndex: session.pushEdgeIndex,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    plotAreaStepNoteEl.textContent = `Network/parse error: ${err}`;
+    plotAreaStepNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  if (!data.success) {
+    // The server names the constraint that actually stopped the push (a neighbouring plot, the
+    // sub-section boundary, a side-count change, or a minimum dimension) rather than blaming
+    // fill triangles, which no longer constrain anything at all.
+    plotAreaStepNoteEl.textContent = data.error || "That resize was refused.";
+    plotAreaStepNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  session.workingVertices = data.plot.vertices.map((v) => ({ x: v.x, y: v.y }));
+  session.lastEdgePushed = data.edgePushed;
+  session.pendingFill = data.fill;
+  session.pendingOpenSpace = data.openSpace;
+  syncPlotFieldValuesFromWorkingVertices();
+  updatePlotAreaNote();
+  const labels = labelsFor(session.workingVertices.length).map((l) => `${l}'`);
+  const n = session.workingVertices.length;
+  plotAreaStepNoteEl.textContent =
+    `Pushed edge ${labels[data.edgePushed]}-${labels[(data.edgePushed + 1) % n]}. ` +
+    `Click "Save plot" to keep it.`;
+  plotAreaStepNoteEl.classList.remove("closure-error");
+  plotNameNoteEl.textContent = `Editing ${session.name}.`;
+  plotNameNoteEl.classList.remove("closure-error");
+  drawPlotEditorPreview();
+}
+
+plotAreaPlusBtnEl.addEventListener("click", () => stepPlotArea("grow"));
+plotAreaMinusBtnEl.addEventListener("click", () => stepPlotArea("shrink"));
+if (pushEdgeSelectEl) {
+  pushEdgeSelectEl.addEventListener("change", () => {
+    if (!plotEditSession) return;
+    plotEditSession.pushEdgeIndex = pushEdgeSelectEl.value === "" ? null : parseInt(pushEdgeSelectEl.value, 10);
+    drawPlotEditorPreview();
+  });
+}
+
+// The vertices to actually draw for one plot: the live working copy for the plot being edited,
+// and whatever is committed for everything else. No other plot has a "live" state any more -
+// an edit can't move one.
+function plotDisplayVertices(subIndex, plotIndex) {
+  const session = plotEditSession;
+  const committed = subsections[subIndex].plots[plotIndex].vertices;
+  if (!session) return committed;
+  if (subIndex === session.subIndex && plotIndex === session.plotIndex) return session.workingVertices;
+  return committed;
+}
+
+function loadPlotForEditing(name) {
+  const found = findRealPlotByName(name);
+  if (!found) {
+    plotEditSession = null;
+    plotEditFieldsEl.style.display = "none";
+    plotNameNoteEl.textContent = `No real plot named "${name}" found - check the name (e.g. S1P1). Fill plots (S1F1, ...) are derived from the leftover land and aren't editable.`;
+    plotNameNoteEl.classList.add("closure-error");
+    plotAreaStepNoteEl.textContent = "";
+    plotAreaStepNoteEl.classList.remove("closure-error");
+    drawPlotEditorPreview();
+    return;
+  }
+  const { subIndex, plotIndex, plot } = found;
+  const originalVertices = plot.vertices.map((v) => ({ x: v.x, y: v.y }));
+  const dx = originalVertices[1].x - originalVertices[0].x;
+  const dy = originalVertices[1].y - originalVertices[0].y;
+  plotEditSession = {
+    subIndex, plotIndex, name: plot.name,
+    originalVertices,
+    workingVertices: originalVertices.map((v) => ({ x: v.x, y: v.y })),
+    anchorPos: { x: originalVertices[0].x, y: originalVertices[0].y },
+    anchorHeadingRad: Math.atan2(dy, dx),
+    frontageEdges: plotFrontageEdgeIndices(originalVertices, subsections[subIndex]),
+    pushEdgeIndex: null,
+    lastEdgePushed: null,
+    pendingFill: null,
+    pendingOpenSpace: null,
+  };
+  plotNameNoteEl.textContent = `Editing ${plot.name} (${originalVertices.length} sides).`;
+  plotNameNoteEl.classList.remove("closure-error");
+  savePlotNoteEl.textContent = "";
+  savePlotNoteEl.classList.remove("closure-error");
+  buildPlotEditFields();
+  buildPushEdgeOptions();
+  plotEditFieldsEl.style.display = "block";
+  drawPlotEditorPreview();
+}
+
+function drawPlotEditorPreview() {
+  if (!currentVertices) {
+    plotEditorSvgEl.innerHTML = "";
+    return;
+  }
+  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
+  let svg = openSpaceDefsSvg() + baseSvg;
+  svg += internalRoadBandSvg(transform);
+  const session = plotEditSession;
+  subsections.forEach((s, si) => {
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
+    // While an un-saved resize is pending, show the fill/open space the server rebuilt around
+    // it rather than the committed view, so the display matches what Save would actually keep.
+    const pendingSub = session && si === session.subIndex && session.pendingFill;
+    svg += openSpaceSvg(transform, pendingSub ? { openSpace: session.pendingOpenSpace } : s);
+    if (pendingSub) {
+      (session.pendingFill || []).forEach((pl) => {
+        svg += `<polygon points="${polygonPoints(transform, pl.vertices)}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
+      });
+    }
+    (s.plots || []).forEach((plot, pi) => {
+      const isEdited = !!session && si === session.subIndex && pi === session.plotIndex;
+      if (pendingSub && plot.fill) return; // superseded by the pending fill drawn above
+      const verts = plotDisplayVertices(si, pi);
+      const isFill = plot.fill;
+      const pts = polygonPoints(transform, verts);
+      if (isEdited) {
+        svg += `<polygon points="${pts}" fill="rgba(31,111,180,0.18)" stroke="#1f6fb4" stroke-width="2" />`;
+      } else if (isFill) {
+        svg += `<polygon points="${pts}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
+      } else {
+        svg += `<polygon points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
+      }
+      if (!isFill || plot.area >= 60 || isEdited) {
+        const pcen = centroidOf(verts);
+        const ppc = transform(pcen);
+        svg += `<text x="${ppc.x.toFixed(1)}" y="${ppc.y.toFixed(1)}" font-size="${isFill && !isEdited ? 7 : 9}" font-weight="600" fill="#1f2430" text-anchor="middle">${plot.name || `S${si + 1}P${pi + 1}`}</text>`;
+        svg += plotSideLabelsSvg(transform, { vertices: verts, fill: isFill, area: polygonArea(verts) });
+      }
+      if (isEdited) {
+        // The edge the next +/- click will push (explicitly chosen, or the last one the server
+        // picked automatically) is drawn thick so it's obvious which side is about to move.
+        const highlight = session.pushEdgeIndex !== null ? session.pushEdgeIndex : session.lastEdgePushed;
+        if (highlight !== null && highlight !== undefined && verts[highlight]) {
+          const a = transform(verts[highlight]);
+          const b = transform(verts[(highlight + 1) % verts.length]);
+          svg += `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="#e8830c" stroke-width="3.5" stroke-linecap="round" />`;
+        }
+        const cornerLabels = labelsFor(verts.length).map((l) => `${l}'`);
+        verts.forEach((v, vi) => {
+          const p = transform(v);
+          svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.2" fill="#1f6fb4" stroke="none" />`;
+          svg += `<text x="${(p.x + 6).toFixed(1)}" y="${(p.y - 6).toFixed(1)}" font-size="7" font-weight="700" fill="#1f6fb4">${cornerLabels[vi]}</text>`;
+        });
+      }
+    });
+  });
+  plotEditorSvgEl.innerHTML = svg;
+}
+
+// Simple O(n^2) non-adjacent segment-intersection check - plots here are always small polygons
+// (at most a handful of sides), so this is plenty fast and needs no spatial indexing.
+// A real plot must stay within the sub-section it belongs to - editing a shared corner freely
+// could otherwise stretch a plot straight into the road strip or past the sub-section's own
+// outer edge, which is just as much "bad geometry" for a real plot as self-intersecting. Each
+// corner is nudged slightly toward the sub-section's centroid before testing, same reasoning
+// as elsewhere in this app: ray-casting containment is unreliable for a point sitting exactly
+// on a boundary edge, which a plot's own corner very often does by construction.
+function plotStaysInsideSubsection(verts, subVertices) {
+  const centroid = centroidOf(subVertices);
+  return verts.every((v) => {
+    const dx = centroid.x - v.x, dy = centroid.y - v.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const nudged = { x: v.x + (dx / len) * 0.05, y: v.y + (dy / len) * 0.05 };
+    return pointInPolygon(nudged, subVertices);
+  });
+}
+
+function ccw3(a, b, c) {
+  return (c.y - a.y) * (b.x - a.x) - (b.y - a.y) * (c.x - a.x);
+}
+
+// Strict "proper crossing" test - two segments that merely touch at a shared endpoint (as
+// every pair of edges around a polygon, or two genuinely adjacent plots' shared boundary, does)
+// are NOT considered intersecting, only a true transversal crossing counts.
+function properSegmentsIntersect(p1, p2, p3, p4) {
+  const d1 = ccw3(p3, p4, p1), d2 = ccw3(p3, p4, p2), d3 = ccw3(p1, p2, p3), d4 = ccw3(p1, p2, p4);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+function polygonSelfIntersects(verts) {
+  const n = verts.length;
+  for (let i = 0; i < n; i++) {
+    const a1 = verts[i], a2 = verts[(i + 1) % n];
+    for (let j = i + 1; j < n; j++) {
+      if (j === i || j === (i + 1) % n || (j + 1) % n === i) continue; // adjacent edges share a vertex
+      const b1 = verts[j], b2 = verts[(j + 1) % n];
+      if (properSegmentsIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  return false;
+}
+
+function distancePointToSegment(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+// "Inside" here means genuinely inside, not just touching the boundary - a point sitting on
+// (or within `tol` of) an edge is treated as boundary/touching, not overlap, since adjacent
+// plots sharing an edge or corner is completely normal and must not be flagged.
+function pointStrictlyInsidePolygon(pt, poly, tol) {
+  if (!pointInPolygon(pt, poly)) return false;
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    if (distancePointToSegment(pt, poly[i], poly[(i + 1) % n]) < tol) return false;
+  }
+  return true;
+}
+
+// Do these two plot polygons share real interior area (not just a common edge/corner)? Used as
+// a final safety net after any live-edit propagation - two plots merely touching along a shared
+// boundary is normal adjacency, but one plot's edge actually cutting into another's interior
+// means the edit went further than it should have, even if each shape checked out on its own.
+function polygonsOverlap(polyA, polyB) {
+  const nA = polyA.length, nB = polyB.length;
+  const tol = 0.1;
+  for (let i = 0; i < nA; i++) {
+    const a1 = polyA[i], a2 = polyA[(i + 1) % nA];
+    for (let j = 0; j < nB; j++) {
+      const b1 = polyB[j], b2 = polyB[(j + 1) % nB];
+      if (properSegmentsIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  const midpoints = (poly) => poly.map((v, i) => {
+    const w = poly[(i + 1) % poly.length];
+    return { x: (v.x + w.x) / 2, y: (v.y + w.y) / 2 };
+  });
+  for (const p of polyA.concat(midpoints(polyA))) {
+    if (pointStrictlyInsidePolygon(p, polyB, tol)) return true;
+  }
+  for (const p of polyB.concat(midpoints(polyB))) {
+    if (pointStrictlyInsidePolygon(p, polyA, tol)) return true;
+  }
+  return false;
+}
+
+plotNameInputEl.addEventListener("input", () => {
+  const name = plotNameInputEl.value.trim();
+  if (!name) {
+    plotEditSession = null;
+    plotEditFieldsEl.style.display = "none";
+    plotNameNoteEl.textContent = "";
+    plotNameNoteEl.classList.remove("closure-error");
+    savePlotNoteEl.textContent = "";
+    plotAreaStepNoteEl.textContent = "";
+    plotAreaStepNoteEl.classList.remove("closure-error");
+    drawPlotEditorPreview();
+    return;
+  }
+  loadPlotForEditing(name);
+});
+
+addPlotDiagonalBtnEl.addEventListener("click", () => {
+  addPlotDiagonalRow(0, null);
+  onPlotFieldChanged();
+});
+
+resetPlotBtnEl.addEventListener("click", () => {
+  if (!plotEditSession) return;
+  loadPlotForEditing(plotEditSession.name); // reloads fresh from the still-untouched committed data
+});
+
+savePlotBtnEl.addEventListener("click", async () => {
+  const session = plotEditSession;
+  if (!session) return;
+
+  // Client-side safety net. The server re-checks all of this (and the full per-sub-section
+  // invariants) when it regenerates the fill below, but refusing an obviously-bad shape here
+  // keeps the failure next to the fields that caused it.
+  const editedArea = polygonArea(session.workingVertices);
+  const sub = subsections[session.subIndex];
+  if (editedArea < 1 || polygonSelfIntersects(session.workingVertices) || !plotStaysInsideSubsection(session.workingVertices, sub.vertices)) {
+    savePlotNoteEl.textContent = `Bad geometry warning: ${session.name}'s own shape is invalid (self-intersecting, collapsed, or pokes outside its sub-section/into a road) - adjust the values and try again.`;
+    savePlotNoteEl.classList.add("closure-error");
+    return;
+  }
+  const hit = editWouldCauseUnrelatedOverlap(session, session.workingVertices);
+  if (hit) {
+    savePlotNoteEl.textContent = `Bad geometry warning: this change would make ${session.name} overlap ${hit} - adjust the values and try again.`;
+    savePlotNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  // Only the edited plot's own polygon is written. Every other real plot is left exactly as it
+  // was; the fill and open space are then rebuilt from the residual the new shape leaves behind.
+  const plot = sub.plots[session.plotIndex];
+  const previousVertices = plot.vertices;
+  const previousArea = plot.area;
+  plot.vertices = session.workingVertices;
+  plot.area = editedArea;
+
+  savePlotNoteEl.textContent = "Saving...";
+  savePlotNoteEl.classList.remove("closure-error");
+  let data;
+  try {
+    const res = await fetch("/regenerate-fill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subsection: { vertices: sub.vertices },
+        plots: sub.plots.map((pl) => ({ name: pl.name, fill: !!pl.fill, vertices: pl.vertices })),
+        params: subsectionParams(sub),
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    plot.vertices = previousVertices;
+    plot.area = previousArea;
+    savePlotNoteEl.textContent = `Network/parse error: ${err}`;
+    savePlotNoteEl.classList.add("closure-error");
+    return;
+  }
+  if (!data.success) {
+    plot.vertices = previousVertices;
+    plot.area = previousArea;
+    savePlotNoteEl.textContent = `[${data.stage || "error"}] ${data.error}`;
+    savePlotNoteEl.classList.add("closure-error");
+    return;
+  }
+  if ((data.invariantErrors || []).length) {
+    plot.vertices = previousVertices;
+    plot.area = previousArea;
+    savePlotNoteEl.textContent = `Bad geometry warning: ${data.invariantErrors[0]} - the save was rolled back.`;
+    savePlotNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  applyRegeneratedFill(sub, data.fill, data.openSpace);
+  sub.invariantErrors = [];
+  if (sub.details) sub.details.invariantErrors = [];
+  renderSubsectionDetails(sub);
+
+  const savedName = session.name;
+  loadPlotForEditing(savedName); // fresh session from the now-committed data
+  // After the reload, not before - loadPlotForEditing() clears this note as part of starting a
+  // new session, which used to wipe the confirmation the instant it was written.
+  savePlotNoteEl.textContent = `${savedName} saved. Fill and open space rebuilt around it.`;
+  savePlotNoteEl.classList.remove("closure-error");
+  drawPlotLogicPreview();
+});
+
+finalizePlotLogicBtn.addEventListener("click", () => {
+  if (!subsections.length) {
+    finalizePlotLogicNoteEl.textContent = "Finalize road logic first so there are sub-sections to fill.";
+    finalizePlotLogicNoteEl.classList.add("closure-error");
+    return;
+  }
+  const notReady = subsections.filter((s) => !s.details || s.details.error);
+  if (notReady.length) {
+    finalizePlotLogicNoteEl.textContent =
+      `Insert plots for every sub-section first - Sub-section ${notReady.map((s) => s.index + 1).join(", ")} ` +
+      `${notReady.length > 1 ? "haven't" : "hasn't"} been filled yet.`;
+    finalizePlotLogicNoteEl.classList.add("closure-error");
+    return;
+  }
+  finalizePlotLogicNoteEl.textContent = "";
+  finalizePlotLogicNoteEl.classList.remove("closure-error");
+  plotEditorCardEl.style.display = "block";
+  drawPlotEditorPreview();
+  plotEditorCardEl.scrollIntoView({ behavior: "smooth", block: "start" });
+});
 
 // Locks in a clean, combined presentation of every sub-section's plots together, plus totals
 // across the whole master plan - the plot-logic equivalent of the site plan's own "Finalise
@@ -2834,16 +3833,16 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
   finalizeMasterPlanNoteEl.classList.remove("closure-error");
   drawMasterPlanPreview();
 
-  let totalFrontage = 0, totalFill = 0, totalUsed = 0, totalWasted = 0, totalSubArea = 0;
+  let totalFrontage = 0, totalFill = 0, totalUsed = 0, totalOpen = 0, totalSubArea = 0;
   let biggest = null, smallest = null;
   subsections.forEach((s) => {
     totalFrontage += s.details.frontageCount || 0;
     totalFill += s.details.fillCount || 0;
     totalUsed += s.details.usedArea || 0;
-    totalWasted += s.details.wastedArea || 0;
+    totalOpen += s.details.openArea || 0;
     totalSubArea += s.details.subArea || 0;
     (s.plots || []).forEach((plot, pi) => {
-      const entry = { label: `S${s.index + 1}P${pi + 1}`, area: plot.area, fill: plot.fill };
+      const entry = { label: plot.name || `S${s.index + 1}P${pi + 1}`, area: plot.area, fill: plot.fill };
       if (!biggest || entry.area > biggest.area) biggest = entry;
       if (!smallest || entry.area < smallest.area) smallest = entry;
     });
@@ -2851,9 +3850,9 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
 
   const au = areaUnitLabel();
   const lines = [
-    `<strong>${subsections.length}</strong> sub-section(s), <strong>${totalFrontage}</strong> road-facing plot(s) + <strong>${totalFill}</strong> corner-fill triangle(s).`,
+    `<strong>${subsections.length}</strong> sub-section(s), <strong>${totalFrontage}</strong> road-facing plot(s) + <strong>${totalFill}</strong> fill plot(s).`,
     `Used: ${sqFeetToDisplayArea(totalUsed).toFixed(1)} ${au} / Master plan land: ${sqFeetToDisplayArea(totalSubArea).toFixed(1)} ${au}`,
-    `Wasted: ${sqFeetToDisplayArea(totalWasted).toFixed(1)} ${au}`,
+    `Open space: ${sqFeetToDisplayArea(totalOpen).toFixed(1)} ${au}`,
   ];
   if (biggest) lines.push(`Biggest plot: ${biggest.label}${biggest.fill ? " (fill)" : ""} (${sqFeetToDisplayArea(biggest.area).toFixed(1)} ${au})`);
   if (smallest) lines.push(`Smallest plot: ${smallest.label}${smallest.fill ? " (fill)" : ""} (${sqFeetToDisplayArea(smallest.area).toFixed(1)} ${au})`);

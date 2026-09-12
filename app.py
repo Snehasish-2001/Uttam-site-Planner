@@ -14,6 +14,8 @@ PLOT/SETBACK/FOOTPRINT drawing branches added to json_to_dxf.py / pdf_render.py.
 
     /compute-site       - metes-and-bounds site plot -> resolved plot + buildable polygon
     /compute-footprint  - metes-and-bounds footprint -> resolved footprint + containment check
+    /resize-plot        - grow/shrink one real plot by an edge push + regenerated fill
+    /regenerate-fill    - rebuild a sub-section's fill/open space from its real plots
     /generate-plan      - (not yet wired - lands with the page-4 LLM generation stage)
     /generate-pdf       - layout.json -> PDF, same contract as uttam-4
     /generate-pdf-from-dxf - live-edited-viewer DXF -> PDF, same contract as uttam-4
@@ -48,7 +50,9 @@ from site_geometry import (
     insert_plots,
     offset_polygon_edges,
     polygon_contains,
+    regenerate_fill,
     regular_polygon_angles,
+    resize_plot,
     vertices_from_edges,
 )
 
@@ -336,6 +340,98 @@ async def insert_plots_endpoint(request: Request):
             "error": f"Unexpected error: {exc}",
             "detail": traceback.format_exc(),
         }
+
+
+@app.post("/resize-plot")
+async def resize_plot_endpoint(request: Request):
+    """Grow or shrink ONE real plot by pushing one of its non-frontage edges, and hand back the
+    sub-section's regenerated fill/open space. `body` needs 'subsection': {vertices:[...]},
+    'roadFacingEdges': [...], 'plots': [{name, vertices, fill}, ...], 'plotName', 'params', and
+    either 'targetArea' or 'direction' ("grow"/"shrink") with an optional 'stepFt'; 'edgeIndex'
+    picks a specific edge instead of the automatic rear-then-sides order.
+
+    Only the named plot's own polygon ever changes - no other real plot is moved or re-saved."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        sub = body.get("subsection")
+        sub_vertices = sub.get("vertices") if isinstance(sub, dict) else None
+        if not isinstance(sub_vertices, list) or len(sub_vertices) < 3:
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected 'subsection': {vertices: [...]}."}
+        plots = body.get("plots")
+        if not isinstance(plots, list) or not plots:
+            return {"success": False, "stage": "site_geometry", "error": "Expected a 'plots' list."}
+        plot_name = body.get("plotName")
+        if not plot_name:
+            return {"success": False, "stage": "site_geometry", "error": "Expected a 'plotName'."}
+
+        target_area = body.get("targetArea")
+        direction = body.get("direction")
+        if target_area is None and direction not in ("grow", "shrink"):
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected either 'targetArea' or 'direction': 'grow' | 'shrink'."}
+
+        edge_index = body.get("edgeIndex")
+        try:
+            result = resize_plot(
+                sub_vertices,
+                body.get("roadFacingEdges") or [],
+                plots,
+                plot_name,
+                body.get("params") or {},
+                direction=direction,
+                step_ft=float(body.get("stepFt") or 2.0),
+                target_area=float(target_area) if target_area is not None else None,
+                edge_index=int(edge_index) if edge_index is not None else None,
+            )
+        except SiteGeometryError as exc:
+            return {"success": False, "stage": "site_geometry", "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry",
+                    "error": f"Resize failed: {exc}", "detail": traceback.format_exc()}
+
+        if "error" in result:
+            return {"success": False, "stage": "resize", **result}
+        return {"success": True, **result}
+
+    except Exception as exc:
+        return {"success": False, "stage": "pipeline", "error": f"Unexpected error: {exc}",
+                "detail": traceback.format_exc()}
+
+
+@app.post("/regenerate-fill")
+async def regenerate_fill_endpoint(request: Request):
+    """Rebuild one sub-section's fill plots and open space from its real plots alone. Fill is a
+    derived view of `sub-section - union(real plots)`, so this runs after any manual edge or
+    diagonal edit is saved, the same way /resize-plot regenerates it after a stepper push.
+    `body` needs 'subsection': {vertices:[...]}, 'plots': [...], and 'params'."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        sub = body.get("subsection")
+        sub_vertices = sub.get("vertices") if isinstance(sub, dict) else None
+        if not isinstance(sub_vertices, list) or len(sub_vertices) < 3:
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected 'subsection': {vertices: [...]}."}
+
+        try:
+            result = regenerate_fill(sub_vertices, body.get("plots") or [], body.get("params") or {})
+        except SiteGeometryError as exc:
+            return {"success": False, "stage": "site_geometry", "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry",
+                    "error": f"Fill regeneration failed: {exc}", "detail": traceback.format_exc()}
+
+        return {"success": True, **result}
+
+    except Exception as exc:
+        return {"success": False, "stage": "pipeline", "error": f"Unexpected error: {exc}",
+                "detail": traceback.format_exc()}
 
 
 @app.post("/generate-pdf")

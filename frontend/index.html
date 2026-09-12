@@ -118,33 +118,6 @@
     <div id="resultBox" class="result-box" style="display:none;"></div>
   </section>
 
-  <section class="card">
-    <h2>Final site plan</h2>
-    <p class="hint">
-      A clean presentation view of the site plan above - plot boundary, vertex labels, roads,
-      neighbours, and the diagonals used to construct it, without the buildable-area guide
-      line. North stays fixed; rotate the drawing itself until its true north lines up with
-      that fixed arrow, exactly like orienting a real site plan sheet.
-    </p>
-    <div class="row">
-      <button id="finaliseBtn">Finalise site plan</button>
-      <div class="field">
-        <label for="rotationInput">Rotate drawing (degrees)</label>
-        <input type="number" id="rotationInput" min="0" max="359" step="1" value="0" />
-      </div>
-    </div>
-    <div class="site-preview site-preview-large" style="position: relative;">
-      <svg id="finalSitePlanSvg" viewBox="-250 -250 1100 920" preserveAspectRatio="xMidYMid meet"></svg>
-      <div id="northIndicator" class="north-indicator">
-        <svg viewBox="0 0 80 80" width="80" height="80">
-          <line x1="40" y1="74" x2="40" y2="46" stroke="#1f2430" stroke-width="4" />
-          <polygon points="26,46 54,46 40,24" fill="#1f2430" />
-          <text x="40" y="18" font-size="20" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#1f2430">N</text>
-        </svg>
-      </div>
-    </div>
-  </section>
-
 </div>
 <div class="wizard-page" id="wizardPagemasterplan" style="display:none;">
   <section class="card" id="roadLogicCard">
@@ -192,13 +165,118 @@
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
       <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
-      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
     </div>
     <p class="hint" id="plotLogicNote"></p>
 
     <div id="subsectionRows"></div>
 
     <div class="row" style="margin-top: 14px;">
+      <button id="finalizePlotLogicBtn" type="button">Finalize plot logic</button>
+      <span id="finalizePlotLogicNote" class="hint" style="margin: 0;"></span>
+    </div>
+  </section>
+
+  <section class="card" id="plotEditorCard" style="display:none;">
+    <h2>Plot editor</h2>
+    <p class="hint">
+      The current master plan is shown below. Type a plot's name (e.g. <code>S1P1</code>) to load
+      it for editing - its own corners are labeled A', B', C'... in the display while it's loaded.
+      Use <strong>&minus;</strong> / <strong>+</strong> to shrink or grow it by pushing one of its
+      own edges (pick which with "Push edge", or leave it on Auto to use the rear edge first), or
+      edit a side/diagonal directly. A plot only ever grows into <em>free land</em> and only ever
+      gives land back to it - <strong>no other plot is ever moved</strong>. The dotted fill plots
+      and hatched open space are a view of whatever land is left over, and are rebuilt around your
+      edit. Nothing is permanent until you click "Save plot". A fill plot (no road frontage) can be
+      promoted into a real plot with "Add plot" below - type its name (e.g. <code>S1F1</code>,
+      several at once separated by spaces) and it becomes a real plot with the next plot number in
+      its sub-section (e.g. <code>S1P4</code>).
+    </p>
+
+    <div class="site-preview">
+      <svg id="plotEditorSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
+      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
+      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
+      <span><span class="swatch" style="border-color:#1f6fb4; border-top-width:3px;"></span>Plot being edited</span>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="addPlotInput">Add plot (promote fill plot(s) to real, e.g. S1F1 S1F2)</label>
+        <input type="text" id="addPlotInput" placeholder="e.g. S1F1 S1F2" />
+      </div>
+      <button id="addPlotBtn" type="button" class="secondary">Add plot</button>
+      <span id="addPlotNote" class="hint" style="margin: 0; align-self: center;"></span>
+    </div>
+
+    <div class="row" style="margin-top: 14px;">
+      <div class="field">
+        <label for="plotNameInput">Plot name</label>
+        <input type="text" id="plotNameInput" placeholder="e.g. S1P1" />
+      </div>
+      <span id="plotNameNote" class="hint" style="margin: 0; align-self: center;"></span>
+      <button id="resetPlotBtn" type="button" class="secondary" style="margin-left: auto;">Reset plot</button>
+      <button id="savePlotBtn" type="button">Save plot</button>
+    </div>
+    <p class="hint" id="savePlotNote" style="margin: 4px 0 0;"></p>
+
+    <div id="plotEditFields" style="display:none; margin-top: 14px;">
+      <div class="row">
+        <div class="field">
+          <label for="plotSidesCount">Number of sides (fixed)</label>
+          <input type="number" id="plotSidesCount" disabled />
+        </div>
+        <div class="field">
+          <label>Plot area</label>
+          <div class="row" style="gap: 8px; align-items: center; margin-top: 2px;">
+            <button id="plotAreaMinusBtn" type="button" class="secondary" style="width: 34px; padding: 0;">&minus;</button>
+            <span id="plotAreaValue" style="min-width: 110px; text-align: center; font-weight: 600;"></span>
+            <button id="plotAreaPlusBtn" type="button" class="secondary" style="width: 34px; padding: 0;">+</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="pushEdgeSelect">Push edge</label>
+          <select id="pushEdgeSelect"></select>
+        </div>
+      </div>
+      <p class="hint" id="plotAreaStepNote" style="margin-top: 4px;"></p>
+
+      <table class="edge-table" style="margin-top: 10px;">
+        <thead>
+          <tr>
+            <th style="width: 90px;">Edge</th>
+            <th>Length (ft)</th>
+          </tr>
+        </thead>
+        <tbody id="plotEdgeRows"></tbody>
+      </table>
+
+      <div style="margin-top: 16px;">
+        <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals</h3>
+        <p class="hint" id="plotDiagonalsNote"></p>
+        <table class="edge-table" id="plotDiagonalsTable" style="display:none;">
+          <thead>
+            <tr>
+              <th style="width: 90px;">From</th>
+              <th style="width: 90px;">To</th>
+              <th>Length (ft)</th>
+            </tr>
+          </thead>
+          <tbody id="plotDiagonalRows"></tbody>
+        </table>
+        <button id="addPlotDiagonalBtn" type="button" class="secondary" style="display:none; margin-top: 8px;">+ Add diagonal</button>
+      </div>
+
+      <p class="hint" id="plotAreaNote" style="margin-top: 12px; font-weight: 600;"></p>
+    </div>
+
+    <div class="row" style="margin-top: 18px;">
       <button id="finalizeMasterPlanBtn" type="button">Finalize master plan</button>
       <span id="finalizeMasterPlanNote" class="hint" style="margin: 0;"></span>
     </div>
@@ -208,7 +286,7 @@
     <h2>Final master plan</h2>
     <p class="hint">
       A clean, locked presentation view of the whole master plan - every sub-section's plots
-      (frontage plots and corner-fill triangles) together in one drawing, with the totals below.
+      (frontage plots, fill plots and open space) together in one drawing, with the totals below.
     </p>
     <div class="site-preview">
       <svg id="masterPlanSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
@@ -217,7 +295,8 @@
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
       <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
-      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Corner-fill triangle (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
     </div>
     <div id="masterPlanSummary" class="result-box" style="display:none;"></div>
   </section>
@@ -342,6 +421,36 @@
 
     <div id="footprintAreaSummary" class="result-box" style="display:none;"></div>
     <div id="footprintErrorBox" class="error-box" style="display:none;"></div>
+  </section>
+</div>
+
+<div class="shared-with-masterplan" id="finalSitePlanAlways">
+  <section class="card">
+    <h2>Final site plan</h2>
+    <p class="hint">
+      A clean presentation view of the site plan above - plot boundary, vertex labels, roads,
+      neighbours, and the diagonals used to construct it, without the buildable-area guide
+      line. North stays fixed; rotate the drawing itself until its true north lines up with
+      that fixed arrow, exactly like orienting a real site plan sheet. Sits here, right above
+      the print sheet that uses it, on both the Site plan and Master plan steps.
+    </p>
+    <div class="row">
+      <button id="finaliseBtn">Finalise site plan</button>
+      <div class="field">
+        <label for="rotationInput">Rotate drawing (degrees)</label>
+        <input type="number" id="rotationInput" min="0" max="359" step="1" value="0" />
+      </div>
+    </div>
+    <div class="site-preview site-preview-large" style="position: relative;">
+      <svg id="finalSitePlanSvg" viewBox="-250 -250 1100 920" preserveAspectRatio="xMidYMid meet"></svg>
+      <div id="northIndicator" class="north-indicator">
+        <svg viewBox="0 0 80 80" width="80" height="80">
+          <line x1="40" y1="74" x2="40" y2="46" stroke="#1f2430" stroke-width="4" />
+          <polygon points="26,46 54,46 40,24" fill="#1f2430" />
+          <text x="40" y="18" font-size="20" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#1f2430">N</text>
+        </svg>
+      </div>
+    </div>
   </section>
 </div>
 
