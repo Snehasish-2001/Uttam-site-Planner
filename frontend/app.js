@@ -774,6 +774,13 @@ function updateAreaSummary(plotVertices) {
 function buildPlotSvg(plotVertices, options) {
   const showVertices = !options || options.showVertices !== false;
   const showDiagonals = !options || options.showDiagonals !== false;
+  // The finalized site plan and its PDF export want a clean, ink-only presentation drawing
+  // (matching a real surveyor's sheet) rather than the color-coded working view every other
+  // caller of this function still wants (green length labels stand out against colored plot
+  // fills elsewhere) - monochrome swaps just that one non-neutral color for the same near-black
+  // used everywhere else in the drawing.
+  const monochrome = !!(options && options.monochrome);
+  const lengthLabelColor = monochrome ? "#1f2430" : "#2f6f4f";
   // Everything about the plot presentation EXCEPT the buildable-area overlay (drawPreview
   // adds that on top for the live working view; the finalised site plan deliberately
   // omits it) - shared so the two displays can never drift apart. Roads extend outside
@@ -910,7 +917,7 @@ function buildPlotSvg(plotVertices, options) {
     const lengthText = `${feetToDisplay(length).toFixed(2)} ${unitLabel()}`;
     const lengthFontSize = fontSizeForEdgeText(screenLen, lengthText.length, 6.5, 12);
     svg += `<text x="${pInside.x.toFixed(1)}" y="${pInside.y.toFixed(1)}" font-size="${lengthFontSize.toFixed(1)}" font-weight="600" ` +
-      `fill="#2f6f4f" text-anchor="middle" dominant-baseline="middle" ` +
+      `fill="${lengthLabelColor}" text-anchor="middle" dominant-baseline="middle" ` +
       `transform="rotate(${angleDeg.toFixed(1)} ${pInside.x.toFixed(1)} ${pInside.y.toFixed(1)})">${lengthText}</text>`;
 
     // Neighbour name/plot: outside the polygon (where the length label used to sit),
@@ -972,7 +979,8 @@ function offsetPolyline(path, h) {
   });
 }
 
-function internalRoadBandSvg(transform) {
+function internalRoadBandSvg(transform, monochrome) {
+  const roadColor = monochrome ? "#5b6169" : "#7d5ba6";
   let svg = "";
   (roads || []).forEach((r) => {
     if (!r) return;
@@ -985,9 +993,9 @@ function internalRoadBandSvg(transform) {
       return left.concat(right).map(transform).map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
     };
     if (buffer > 0) {
-      svg += `<polygon points="${bandPoints(half + buffer)}" fill="#7d5ba6" opacity="0.15" stroke="none" />`;
+      svg += `<polygon points="${bandPoints(half + buffer)}" fill="${roadColor}" opacity="0.15" stroke="none" />`;
     }
-    svg += `<polygon points="${bandPoints(half)}" fill="#7d5ba6" opacity="0.55" stroke="none" />`;
+    svg += `<polygon points="${bandPoints(half)}" fill="${roadColor}" opacity="${monochrome ? 0.35 : 0.55}" stroke="none" />`;
   });
   return svg;
 }
@@ -1010,7 +1018,12 @@ function drawPreview(plotVertices, buildableVertices) {
 
 function renderFinalSitePlan() {
   if (!currentVertices) return;
-  const { svg: content, transform } = buildPlotSvg(currentVertices, { showVertices: false, showDiagonals: false });
+  // Once roads/plots exist, the finalized, orientable presentation should show the actual
+  // master plan (sub-sections, real/fill plots) rather than just the bare site boundary - the
+  // same content "Final master plan" already shows, just rotatable to true north here.
+  const { svg: content, transform } = hasMasterPlanContent()
+    ? buildMasterPlanContentSvg({ showVertices: false, showDiagonals: false, monochrome: true, monochromePlots: true })
+    : buildPlotSvg(currentVertices, { showVertices: false, showDiagonals: false, monochrome: true });
   const rotation = ((parseFloat(rotationInputEl.value) || 0) % 360 + 360) % 360;
   // Pivot on the drawing's own screen-space center (not the viewBox's own center) - the
   // shape doesn't necessarily fill/center within the viewBox on its own, so rotating
@@ -1035,7 +1048,11 @@ const EXPORT_VIEWBOX = { minX: -250, minY: -250, w: 1100, h: 920 };
 
 function buildExportSvg() {
   if (!currentVertices) return null;
-  const { svg: content, transform } = buildPlotSvg(currentVertices, { showVertices: false, showDiagonals: false });
+  // Same fallback as renderFinalSitePlan() - the Print Sheet should embed the real master plan
+  // once one exists, not just the bare boundary "Final site plan" shows before roads/plots do.
+  const { svg: content, transform } = hasMasterPlanContent()
+    ? buildMasterPlanContentSvg({ showVertices: false, showDiagonals: false, monochrome: true, monochromePlots: true })
+    : buildPlotSvg(currentVertices, { showVertices: false, showDiagonals: false, monochrome: true });
   const rotation = ((parseFloat(rotationInputEl.value) || 0) % 360 + 360) % 360;
   const screenPts = currentVertices.map(transform);
   const xs = screenPts.map((p) => p.x), ys = screenPts.map((p) => p.y);
@@ -2944,24 +2961,36 @@ finalizeRoadLogicBtn.addEventListener("click", async () => {
   }
 });
 
-function drawMasterPlanPreview() {
-  if (!currentVertices) {
-    masterPlanSvgEl.innerHTML = "";
-    return;
-  }
-  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, { showVertices: true, showDiagonals: false });
+// The full master-plan drawing (sub-sections, real/fill plots, roads) - shared by "Final
+// master plan" and, once a master plan actually exists, by "Final site plan" and the Print
+// Sheet export, so all three show the real subdivided plan instead of just the bare plot
+// boundary the moment sub-sections/plots exist. `options.monochrome` is passed straight
+// through to buildPlotSvg for the outer boundary's own text color only - "Final master plan"
+// wants that (a plain black boundary label) while keeping its colored plot fills exactly as
+// they are. `options.monochromePlots` is the separate, stronger switch that ALSO swaps every
+// plot/sub-section/road color in here for the same ink-only neutral tones - only "Final site
+// plan"/the Print Sheet export set it, since real vs fill plots still read apart there by
+// solid-vs-dashed outline, not color, same as the rest of a printed presentation sheet.
+function buildMasterPlanContentSvg(options) {
+  const monochrome = !!(options && options.monochromePlots);
+  const subsectionColor = monochrome ? "#5b6169" : "#2f6f4f";
+  const realStrokeColor = monochrome ? "#1f2430" : "#2f6f4f";
+  const realFillColor = monochrome ? "none" : "rgba(47,111,79,0.12)";
+  const fillPlotStrokeColor = monochrome ? "#5b6169" : "#c87828";
+  const fillPlotFillColor = monochrome ? "none" : "rgba(200,120,40,0.10)";
+  const { svg: baseSvg, transform } = buildPlotSvg(currentVertices, options);
   let svg = openSpaceDefsSvg() + baseSvg;
-  svg += internalRoadBandSvg(transform);
+  svg += internalRoadBandSvg(transform, monochrome);
   subsections.forEach((s, si) => {
-    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="#2f6f4f" stroke-width="1.5" />`;
+    svg += `<polygon points="${polygonPoints(transform, s.vertices)}" fill="none" stroke="${subsectionColor}" stroke-width="1.5" />`;
     svg += openSpaceSvg(transform, s);
     (s.plots || []).forEach((plot, pi) => {
       const isFill = plot.fill;
       const pts = polygonPoints(transform, plot.vertices);
       if (isFill) {
-        svg += `<polygon points="${pts}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
+        svg += `<polygon points="${pts}" fill="${fillPlotFillColor}" stroke="${fillPlotStrokeColor}" stroke-width="1" stroke-dasharray="3,3" />`;
       } else {
-        svg += `<polygon points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
+        svg += `<polygon points="${pts}" fill="${realFillColor}" stroke="${realStrokeColor}" stroke-width="1.2" />`;
       }
       if (!isFill || plot.area >= 60) {
         const pcen = centroidOf(plot.vertices);
@@ -2971,6 +3000,25 @@ function drawMasterPlanPreview() {
       }
     });
   });
+  return { svg, transform };
+}
+
+// True once roads have been carved into sub-sections and at least one has been filled with
+// plots - the point past which there's an actual master plan to show, not just the bare site
+// boundary "Final site plan"/the Print Sheet fall back to before then.
+function hasMasterPlanContent() {
+  return subsections.length > 0 && subsections.some((s) => (s.plots || []).length > 0);
+}
+
+function drawMasterPlanPreview() {
+  if (!currentVertices) {
+    masterPlanSvgEl.innerHTML = "";
+    return;
+  }
+  // "Final master plan" is a locked presentation view, same as "Final site plan" - the outer
+  // boundary drops its corner letters and its length labels' color for the same reason: this
+  // is the clean deliverable, not the working drawing that needed them for construction.
+  const { svg } = buildMasterPlanContentSvg({ showVertices: false, showDiagonals: false, monochrome: true });
   masterPlanSvgEl.innerHTML = svg;
 }
 
