@@ -1,5 +1,5 @@
 """
-app.py (uttam-5)
+app.py (uttam-site-planner)
 
 Guided-wizard planner app. Phase 1 (this build): pages 1-4 - project/legal info, an
 arbitrary-shape site plot (metes-and-bounds: side lengths + interior angles, any convex or

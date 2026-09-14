@@ -1,21 +1,143 @@
-// uttam-5 - page 2 (site plan) client logic.
+// uttam-6 - two standalone tools (Site Plan, Master Plan) built from one shared UI.
 //
-// Geometry model: with N side lengths fixed, a simple polygon has only N-3 truly free
-// parameters (a triangle needs none - SSS fully determines it; a quadrilateral needs
-// exactly one; a pentagon two; ...). Instead of angles, this uses the same triangulation
-// technique architects/surveyors actually use on site: measure diagonals from one corner
-// (A) with a tape measure, no angle tool needed. A fan of (N-3) diagonals from A splits
-// the polygon into (N-2) triangles, each fully determined by SSS (SIDE-SIDE-SIDE, no
-// ambiguity beyond the usual left/right mirror choice) via circle-circle intersection -
-// closed-form, no iteration.
-
-// Feet is the canonical unit everywhere internally (matching layout_geometry.py, the
-// /compute-site payload, and every other part of this project) - the unit selector only
-// changes what's typed/displayed on this page. Every geometric computation still happens
-// in feet; values are converted at the input/output boundary only.
+// ARCHITECTURE, and the single rule that shapes this whole file:
+//
+//   Site Plan and Master Plan share *code* and share *nothing else*. Everything below the
+//   `createTool()` line is instantiated once per tool: its own cloned DOM subtree, its own
+//   element lookups, its own `currentVertices` / `roads` / `subsections` / `plotEditSession`
+//   / print-sheet fields, its own per-step finalize flags. There is deliberately no shared
+//   store, event bus, URL parameter or localStorage key through which one tool's data could
+//   reach the other - the only module-scope mutable thing in this file is `activeTool`, which
+//   holds *which* instance is currently mounted, never any of its data.
+//
+//   That is why the whole body is a closure rather than module-scope globals (which is what
+//   uttam-5 used, being a single linear wizard). Two instances = two closures = independence
+//   by construction, with no discipline required of any individual function inside.
+//
+// Geometry model (unchanged from uttam-5): with N side lengths fixed, a simple polygon has
+// only N-3 truly free parameters. Instead of angles this uses the triangulation surveyors
+// actually use on site - diagonals measured from one corner (A) with a tape measure. A fan of
+// (N-3) diagonals from A splits the polygon into (N-2) triangles, each fully determined by SSS
+// via circle-circle intersection - closed-form, no iteration.
+//
+// Feet is the canonical unit everywhere internally (matching layout_geometry.py and the
+// /compute-site payload); the unit selector only changes what is typed/displayed.
 const FT_PER_M = 3.280839895;
 const SQFT_PER_KATHA = 720; // West Bengal/Bangladesh convention (20 Chatak = 1 Katha)
 const SQFT_PER_CHATAK = 36;
+
+// Which steps each tool has, in order, and what each tab is called. This table is the only
+// place the two tools differ structurally - everything else below is identical code running
+// against different data.
+const TOOL_DEFS = {
+  site: {
+    title: "Site Plan",
+    badge: "Standalone tool",
+    steps: [
+      { key: "mb", label: "Metes & Bounds" },
+      { key: "north", label: "North Setter" },
+      // The sheet preview is an iframe, not an SVG - there is nothing for the zoom/pan wrapper
+      // to do with it (the PDF viewer has its own zoom), so this step hides those controls.
+      { key: "print", label: "Print Sheet", noZoom: true },
+    ],
+  },
+  master: {
+    title: "Master Plan",
+    badge: "Standalone tool",
+    steps: [
+      { key: "mb", label: "Metes & Bounds" },
+      { key: "road", label: "Road Logic" },
+      { key: "plots", label: "Plot Logic" },
+      { key: "editor", label: "Plot Editor" },
+      { key: "north", label: "North Setter" },
+      { key: "print", label: "Print Sheet", noZoom: true },
+    ],
+  },
+};
+
+let instanceCounter = 0;
+
+// ---------------------------------------------------------------------------------------
+// One tool instance. Everything from here to the matching close brace is per-instance state.
+// ---------------------------------------------------------------------------------------
+function createTool(toolKey, host) {
+  const def = TOOL_DEFS[toolKey];
+  const instanceId = `t${++instanceCounter}`;
+
+  const root = document.getElementById("toolShellTemplate").content.firstElementChild.cloneNode(true);
+  host.innerHTML = "";
+  host.appendChild(root);
+
+  // Every lookup in this instance is scoped to its own subtree. uttam-5 used `id=` and
+  // document.getElementById, which cannot survive two live copies of the same markup on one
+  // page - `data-el=` plus this helper is the same thing, scoped.
+  const $ = (name) => root.querySelector(`[data-el="${name}"]`);
+
+  const stepTabsEl = $("stepTabs");
+  const zoomViewportEl = $("zoomViewport");
+  const zoomCanvasEl = $("zoomCanvas");
+  const zoomControlsEl = $("zoomControls");
+  const zoomLevelEl = $("zoomLevel");
+  const legendHostEl = $("legendHost");
+  const messageAreaEl = $("messageArea");
+  const actionHostEl = $("actionHost");
+  const extraLeftHostEl = $("extraLeftHost");
+  const formHostEl = $("formHost");
+  const paneRightEl = $("paneRight");
+  const readonlyBannerEl = $("readonlyBanner");
+  const finalSheetEl = $("finalSheet");
+  const finalSheetFrameEl = $("finalSheetFrame");
+
+  $("toolTitle").textContent = def.title;
+  $("toolBadge").textContent = def.badge;
+
+  // Step panels: clone the shared step markup. The kept nodes are MOVED into the split layout
+  // on navigation (never re-cloned), so each step's inputs keep their values and listeners
+  // across tab switches.
+  //
+  // Every instance clones EVERY step's markup, not just the ones in its own tab list, so that
+  // the wizard body below can stay byte-identical to uttam-5's (it wires up every control
+  // unconditionally at instance-construction time and would throw on a missing element).
+  // `def.steps` alone decides which steps get a tab and are reachable - the extra parked nodes
+  // are never shown and their state never populates, so e.g. Site Plan's print sheet still
+  // sees an empty `subsections` and correctly falls back to the bare plot boundary.
+  const stepsFragment = document.getElementById("toolStepsTemplate").content.cloneNode(true);
+  const stepNodes = {};
+  stepsFragment.querySelectorAll(".step-def").forEach((node) => {
+    stepNodes[node.dataset.step] = node;
+    root.appendChild(node);            // parked off-layout until this step is shown
+    node.style.display = "none";
+  });
+  def.steps.forEach((s) => {
+    if (!stepNodes[s.key]) throw new Error(`missing step markup for "${s.key}"`);
+  });
+
+  // Set by drawPlotEditorPreview() so a click on the drawing can be mapped back to plot feet.
+  let lastEditorTransform = null;
+
+  // Radio groups are name-scoped per document, so two instances of the same markup would
+  // otherwise share one group and unselect each other's buttons.
+  root.querySelectorAll('input[type="radio"]').forEach((r) => {
+    if (r.name) r.name = `${r.name}__${instanceId}`;
+  });
+
+  // ---- Message area: one place for every step-level message, with real severities. --------
+  // info    - neutral, non-blocking ("closure corrected by 0.3 ft")
+  // warning - amber, something was repaired/assumed but the step still works
+  // error   - red, and always paired with a finalize/action that refused to proceed
+  function setMessage(text, severity) {
+    if (!text) {
+      messageAreaEl.textContent = "";
+      messageAreaEl.className = "message-area";
+      messageAreaEl.dataset.severity = "";
+      return;
+    }
+    messageAreaEl.textContent = text;
+    messageAreaEl.className = `message-area msg-${severity || "info"}`;
+    messageAreaEl.dataset.severity = severity || "info";
+  }
+  function clearMessage() { setMessage(""); }
+
 let currentUnit = "ft";
 
 function feetToDisplay(feet) {
@@ -32,22 +154,16 @@ function unitLabel() {
 
 function updateUnitLabels() {
   const u = unitLabel();
-  const lengthHeader = document.getElementById("lengthHeader");
-  const setbackHeader = document.getElementById("setbackHeader");
-  const roadWidthHeader = document.getElementById("roadWidthHeader");
-  const diagonalLengthHeader = document.getElementById("diagonalLengthHeader");
-  const roadExtensionLabel = document.getElementById("roadExtensionLabel");
-  const footprintLengthHeader = document.getElementById("footprintLengthHeader");
-  const footprintStartXLabel = document.getElementById("footprintStartXLabel");
-  const footprintStartYLabel = document.getElementById("footprintStartYLabel");
+  const lengthHeader = $("lengthHeader");
+  const setbackHeader = $("setbackHeader");
+  const roadWidthHeader = $("roadWidthHeader");
+  const diagonalLengthHeader = $("diagonalLengthHeader");
+  const roadExtensionLabel = $("roadExtensionLabel");
   if (lengthHeader) lengthHeader.textContent = `Length (${u})`;
   if (setbackHeader) setbackHeader.textContent = `Setback (${u})`;
   if (roadWidthHeader) roadWidthHeader.textContent = `Road width (${u})`;
   if (diagonalLengthHeader) diagonalLengthHeader.textContent = `Length (${u})`;
   if (roadExtensionLabel) roadExtensionLabel.textContent = `Road extension (${u}, each side)`;
-  if (footprintLengthHeader) footprintLengthHeader.textContent = `Length (${u})`;
-  if (footprintStartXLabel) footprintStartXLabel.textContent = `Start X (${u})`;
-  if (footprintStartYLabel) footprintStartYLabel.textContent = `Start Y (${u})`;
 }
 
 function labelsFor(n) {
@@ -254,133 +370,103 @@ function solveFromDiagonalGraph(lengths, diagonalSpecs) {
   return { ok: true, vertices: pts };
 }
 
-const unitSelectEl = document.getElementById("unitSelect");
-const sidesCountEl = document.getElementById("sidesCount");
-const regularToggleEl = document.getElementById("regularToggle");
-const regularNoteEl = document.getElementById("regularNote");
-const edgeRowsEl = document.getElementById("edgeRows");
-const diagonalRowsEl = document.getElementById("diagonalRows");
-const diagonalsTableEl = document.getElementById("diagonalsTable");
-const diagonalsNoteEl = document.getElementById("diagonalsNote");
-const diagonalAddBtnEl = document.getElementById("addDiagonalBtn");
-const computeBtn = document.getElementById("computeBtn");
-const closureNoteEl = document.getElementById("closureNote");
-const svgEl = document.getElementById("sitePreviewSvg");
-const statusLogEl = document.getElementById("statusLog");
-const errorBoxEl = document.getElementById("errorBox");
-const resultBoxEl = document.getElementById("resultBox");
-const roadExtensionEl = document.getElementById("roadExtension");
-const areaSummaryEl = document.getElementById("areaSummary");
-const finaliseBtn = document.getElementById("finaliseBtn");
-const rotationInputEl = document.getElementById("rotationInput");
-const finalSvgEl = document.getElementById("finalSitePlanSvg");
-const northIndicatorEl = document.getElementById("northIndicator");
-const adminTypeSelectEl = document.getElementById("adminTypeSelect");
-const adminNameInputEl = document.getElementById("adminNameInput");
-const adminNameLabelEl = document.getElementById("adminNameLabel");
-const wardNoInputEl = document.getElementById("wardNoInput");
-const rsKhatianInputEl = document.getElementById("rsKhatianInput");
-const rsPlotInputEl = document.getElementById("rsPlotInput");
-const csPlotInputEl = document.getElementById("csPlotInput");
-const sketchScaleNTSEl = document.getElementById("sketchScaleNTS");
-const sketchScaleToScaleEl = document.getElementById("sketchScaleToScale");
-const sketchScaleRatioRowEl = document.getElementById("sketchScaleRatioRow");
-const sketchScaleXEl = document.getElementById("sketchScaleX");
-const sketchScaleYEl = document.getElementById("sketchScaleY");
-const siteScaleNTSEl = document.getElementById("siteScaleNTS");
-const siteScaleToScaleEl = document.getElementById("siteScaleToScale");
-const siteScaleRatioRowEl = document.getElementById("siteScaleRatioRow");
-const siteScaleXEl = document.getElementById("siteScaleX");
-const siteScaleYEl = document.getElementById("siteScaleY");
-const mouzaScaleNTSEl = document.getElementById("mouzaScaleNTS");
-const mouzaScaleToScaleEl = document.getElementById("mouzaScaleToScale");
-const mouzaScaleRatioRowEl = document.getElementById("mouzaScaleRatioRow");
-const mouzaScaleXEl = document.getElementById("mouzaScaleX");
-const mouzaScaleYEl = document.getElementById("mouzaScaleY");
-const surveyorNameInputEl = document.getElementById("surveyorNameInput");
-const surveyorRegdInputEl = document.getElementById("surveyorRegdInput");
-const drawnByInputEl = document.getElementById("drawnByInput");
-const additionalNotesInputEl = document.getElementById("additionalNotesInput");
-const mouzaMapInputEl = document.getElementById("mouzaMapInput");
-const previewPdfBtn = document.getElementById("previewPdfBtn");
-const downloadPdfBtn = document.getElementById("downloadPdfBtn");
-const pdfNoteEl = document.getElementById("pdfNote");
-const pdfPreviewFrameEl = document.getElementById("pdfPreviewFrame");
-const addRoadBtnEl = document.getElementById("addRoadBtn");
-const roadLogicSvgEl = document.getElementById("roadLogicSvg");
-const roadRowsEl = document.getElementById("roadRows");
-const roadLogicNoteEl = document.getElementById("roadLogicNote");
-const finalizeRoadLogicBtn = document.getElementById("finalizeRoadLogicBtn");
-const finalizeRoadLogicNoteEl = document.getElementById("finalizeRoadLogicNote");
-const plotLogicCardEl = document.getElementById("plotLogicCard");
-const plotLogicSvgEl = document.getElementById("plotLogicSvg");
-const plotLogicNoteEl = document.getElementById("plotLogicNote");
-const subsectionRowsEl = document.getElementById("subsectionRows");
-const finalizeMasterPlanBtn = document.getElementById("finalizeMasterPlanBtn");
-const finalizeMasterPlanNoteEl = document.getElementById("finalizeMasterPlanNote");
-const masterPlanCardEl = document.getElementById("masterPlanCard");
-const masterPlanSvgEl = document.getElementById("masterPlanSvg");
-const masterPlanSummaryEl = document.getElementById("masterPlanSummary");
-const finalizePlotLogicBtn = document.getElementById("finalizePlotLogicBtn");
-const finalizePlotLogicNoteEl = document.getElementById("finalizePlotLogicNote");
-const plotEditorCardEl = document.getElementById("plotEditorCard");
-const plotEditorSvgEl = document.getElementById("plotEditorSvg");
-const addPlotInputEl = document.getElementById("addPlotInput");
-const addPlotBtnEl = document.getElementById("addPlotBtn");
-const addPlotNoteEl = document.getElementById("addPlotNote");
-const plotNameInputEl = document.getElementById("plotNameInput");
-const plotNameNoteEl = document.getElementById("plotNameNote");
-const plotEditFieldsEl = document.getElementById("plotEditFields");
-const plotSidesCountEl = document.getElementById("plotSidesCount");
-const plotEdgeRowsEl = document.getElementById("plotEdgeRows");
-const plotDiagonalsNoteEl = document.getElementById("plotDiagonalsNote");
-const plotDiagonalsTableEl = document.getElementById("plotDiagonalsTable");
-const plotDiagonalRowsEl = document.getElementById("plotDiagonalRows");
-const addPlotDiagonalBtnEl = document.getElementById("addPlotDiagonalBtn");
-const plotAreaNoteEl = document.getElementById("plotAreaNote");
-const plotAreaMinusBtnEl = document.getElementById("plotAreaMinusBtn");
-const plotAreaPlusBtnEl = document.getElementById("plotAreaPlusBtn");
-const plotAreaValueEl = document.getElementById("plotAreaValue");
-const plotAreaStepNoteEl = document.getElementById("plotAreaStepNote");
-const pushEdgeSelectEl = document.getElementById("pushEdgeSelect");
-const resetPlotBtnEl = document.getElementById("resetPlotBtn");
-const savePlotBtnEl = document.getElementById("savePlotBtn");
-const savePlotNoteEl = document.getElementById("savePlotNote");
-const footprintEntryCardEl = document.getElementById("footprintEntryCard");
-const importSiteplanBtn = document.getElementById("importSiteplanBtn");
-const uploadSiteplanBtn = document.getElementById("uploadSiteplanBtn");
-const uploadSiteplanCardEl = document.getElementById("uploadSiteplanCard");
-const footprintCardEl = document.getElementById("footprintCard");
-const footprintSvgEl = document.getElementById("footprintSvg");
-const footprintPlaceholderNoteEl = document.getElementById("footprintPlaceholderNote");
-const footprintSidesCountEl = document.getElementById("footprintSidesCount");
-const footprintStartXEl = document.getElementById("footprintStartX");
-const footprintStartYEl = document.getElementById("footprintStartY");
-const footprintCornerNoteEl = document.getElementById("footprintCornerNote");
-const footprintRowsEl = document.getElementById("footprintRows");
-const footprintPreviewBtn = document.getElementById("footprintPreviewBtn");
-const footprintStatusNoteEl = document.getElementById("footprintStatusNote");
-const footprintAreaSummaryEl = document.getElementById("footprintAreaSummary");
-const footprintErrorBoxEl = document.getElementById("footprintErrorBox");
-const changeShapeBtn = document.getElementById("changeShapeBtn");
-const changeShapeFieldEl = document.getElementById("changeShapeField");
-const footprintIrregularToggleEl = document.getElementById("footprintIrregularToggle");
-const footprintRectilinearGroupEl = document.getElementById("footprintRectilinearGroup");
-const footprintIrregularGroupEl = document.getElementById("footprintIrregularGroup");
-const footprintIrregularRowsEl = document.getElementById("footprintIrregularRows");
-const footprintDiagonalsNoteEl = document.getElementById("footprintDiagonalsNote");
-const footprintDiagonalsTableEl = document.getElementById("footprintDiagonalsTable");
-const footprintDiagonalRowsEl = document.getElementById("footprintDiagonalRows");
+const unitSelectEl = $("unitSelect");
+const sidesCountEl = $("sidesCount");
+const regularToggleEl = $("regularToggle");
+const regularNoteEl = $("regularNote");
+const edgeRowsEl = $("edgeRows");
+const diagonalRowsEl = $("diagonalRows");
+const diagonalsTableEl = $("diagonalsTable");
+const diagonalsNoteEl = $("diagonalsNote");
+const diagonalAddBtnEl = $("addDiagonalBtn");
+const computeBtn = $("computeBtn");
+const closureNoteEl = $("closureNote");
+const svgEl = $("sitePreviewSvg");
+const statusLogEl = $("statusLog");
+const errorBoxEl = $("errorBox");
+const resultBoxEl = $("resultBox");
+const roadExtensionEl = $("roadExtension");
+const areaSummaryEl = $("areaSummary");
+const finaliseBtn = $("finaliseBtn");
+const rotationInputEl = $("rotationInput");
+const finalSvgEl = $("finalSitePlanSvg");
+const northIndicatorEl = $("northIndicator");
+const adminTypeSelectEl = $("adminTypeSelect");
+const adminNameInputEl = $("adminNameInput");
+const adminNameLabelEl = $("adminNameLabel");
+const wardNoInputEl = $("wardNoInput");
+const rsKhatianInputEl = $("rsKhatianInput");
+const rsPlotInputEl = $("rsPlotInput");
+const csPlotInputEl = $("csPlotInput");
+const sketchScaleNTSEl = $("sketchScaleNTS");
+const sketchScaleToScaleEl = $("sketchScaleToScale");
+const sketchScaleRatioRowEl = $("sketchScaleRatioRow");
+const sketchScaleXEl = $("sketchScaleX");
+const sketchScaleYEl = $("sketchScaleY");
+const siteScaleNTSEl = $("siteScaleNTS");
+const siteScaleToScaleEl = $("siteScaleToScale");
+const siteScaleRatioRowEl = $("siteScaleRatioRow");
+const siteScaleXEl = $("siteScaleX");
+const siteScaleYEl = $("siteScaleY");
+const mouzaScaleNTSEl = $("mouzaScaleNTS");
+const mouzaScaleToScaleEl = $("mouzaScaleToScale");
+const mouzaScaleRatioRowEl = $("mouzaScaleRatioRow");
+const mouzaScaleXEl = $("mouzaScaleX");
+const mouzaScaleYEl = $("mouzaScaleY");
+const surveyorNameInputEl = $("surveyorNameInput");
+const surveyorRegdInputEl = $("surveyorRegdInput");
+const drawnByInputEl = $("drawnByInput");
+const additionalNotesInputEl = $("additionalNotesInput");
+const mouzaMapInputEl = $("mouzaMapInput");
+const previewPdfBtn = $("previewPdfBtn");
+const downloadPdfBtn = $("downloadPdfBtn");
+const pdfNoteEl = $("pdfNote");
+const pdfPreviewFrameEl = $("pdfPreviewFrame");
+const addRoadBtnEl = $("addRoadBtn");
+const roadLogicSvgEl = $("roadLogicSvg");
+const roadRowsEl = $("roadRows");
+const roadLogicNoteEl = $("roadLogicNote");
+const finalizeRoadLogicBtn = $("finalizeRoadLogicBtn");
+const finalizeRoadLogicNoteEl = $("finalizeRoadLogicNote");
+const plotLogicCardEl = $("plotLogicCard");
+const plotLogicSvgEl = $("plotLogicSvg");
+const plotLogicNoteEl = $("plotLogicNote");
+const subsectionRowsEl = $("subsectionRows");
+const finalizeMasterPlanBtn = $("finalizeMasterPlanBtn");
+const finalizeMasterPlanNoteEl = $("finalizeMasterPlanNote");
+const masterPlanCardEl = $("masterPlanCard");
+const masterPlanSvgEl = $("masterPlanSvg");
+const masterPlanSummaryEl = $("masterPlanSummary");
+const finalizePlotLogicBtn = $("finalizePlotLogicBtn");
+const finalizePlotLogicNoteEl = $("finalizePlotLogicNote");
+const plotEditorCardEl = $("plotEditorCard");
+const plotEditorSvgEl = $("plotEditorSvg");
+const addPlotInputEl = $("addPlotInput");
+const addPlotBtnEl = $("addPlotBtn");
+const addPlotNoteEl = $("addPlotNote");
+const plotNameInputEl = $("plotNameInput");
+const plotNameNoteEl = $("plotNameNote");
+const plotEditFieldsEl = $("plotEditFields");
+const plotSidesCountEl = $("plotSidesCount");
+const plotEdgeRowsEl = $("plotEdgeRows");
+const plotDiagonalsNoteEl = $("plotDiagonalsNote");
+const plotDiagonalsTableEl = $("plotDiagonalsTable");
+const plotDiagonalRowsEl = $("plotDiagonalRows");
+const addPlotDiagonalBtnEl = $("addPlotDiagonalBtn");
+const plotAreaNoteEl = $("plotAreaNote");
+const plotAreaMinusBtnEl = $("plotAreaMinusBtn");
+const plotAreaPlusBtnEl = $("plotAreaPlusBtn");
+const plotAreaValueEl = $("plotAreaValue");
+const plotAreaStepNoteEl = $("plotAreaStepNote");
+const pushEdgeSelectEl = $("pushEdgeSelect");
+const resetPlotBtnEl = $("resetPlotBtn");
+const savePlotBtnEl = $("savePlotBtn");
+const savePlotNoteEl = $("savePlotNote");
 
 let mouzaMapDataUrl = null;
 let lastPdfDoc = null;
 
-let lastBuildable = null;   // stashed for page 3 (footprint) to reuse later
-let footprintDefaultsInitialized = false;
-let lastFootprintVertices = null;
-let lastFootprintGapWalk = null;
-let footprintOrientation = 0;    // which of the 4 corner-rotations of the current template is showing
-let footprintCurrentAngles = []; // the template's own angle values - not user-editable anymore
+let lastBuildable = null;   // this tool's own buildable polygon, from its own /compute-site
 let currentVertices = null; // the last successfully resolved plot polygon (local coords)
 let lastBuildableAreaSqft = null;
 let roads = []; // resolved {name, type, width, start, end} for each road-logic row, in order
@@ -396,9 +482,12 @@ function logStatus(line, isError) {
   statusLogEl.scrollTop = statusLogEl.scrollHeight;
 }
 
+// Every showError() call site is a refused action, so it is always a blocking-severity
+// message as well as a red box next to the fields that caused it.
 function showError(message) {
   errorBoxEl.style.display = "block";
   errorBoxEl.textContent = message;
+  setMessage(message, "error");
 }
 
 function clearError() {
@@ -1299,10 +1388,17 @@ function svgTransformFor(vertices) {
   const viewW = 600 - pad * 2;
   const viewH = 420 - pad * 2;
   const scale = Math.min(viewW / w, viewH / h);
-  return (pt) => ({
+  const fn = (pt) => ({
     x: pad + (pt.x - minX) * scale,
     y: pad + (maxY - pt.y) * scale, // flip Y so North is up
   });
+  // Needed by the Plot Editor's click-to-select: an SVG-user-space point coming back from
+  // getScreenCTM() has to be turned back into plot feet to hit-test against plot polygons.
+  fn.inverse = (p) => ({
+    x: minX + (p.x - pad) / scale,
+    y: maxY - (p.y - pad) / scale,
+  });
+  return fn;
 }
 
 function fontSizeForEdgeText(screenLen, textLength, minSize, maxSize) {
@@ -1352,599 +1448,37 @@ async function computeSite() {
     if (!data.success) {
       showError(`[${data.stage || "error"}] ${data.error}`);
       logStatus(`Failed: ${data.error}`, true);
-      return;
+      return false;
     }
 
     lastBuildable = data.buildable.vertices;
     lastBuildableAreaSqft = polygonArea(lastBuildable);
     drawPreview(data.plot.vertices, lastBuildable);
-    initFootprintDefaults();
-    drawFootprintPreview();
-    drawRoadLogicPreview(); // keep the Master plan page's own preview in sync too, in case it's already open
+    drawRoadLogicPreview(); // keep the Road Logic step's own preview in sync too
 
     let msg = `Buildable area computed (${data.buildable.vertices.length} vertices).`;
+    // Severity comes from what the backend actually reported: a compass-rule closure
+    // correction is routine (info), while a setback offset that needed geometric repair is
+    // something the user should look at before trusting the outline (warning).
+    let severity = "info";
     if (data.adjusted) msg += ` Closure auto-corrected (${data.closure_error_ft} ft error).`;
-    if (data.buildable.repaired) msg += ` Note: setbacks required geometric repair near a tight corner - double-check the buildable outline looks reasonable.`;
+    if (data.buildable.repaired) {
+      msg += ` Note: setbacks required geometric repair near a tight corner - double-check the buildable outline looks reasonable.`;
+      severity = "warning";
+    }
     resultBoxEl.style.display = "block";
     resultBoxEl.textContent = msg;
+    setMessage(msg, severity);
     logStatus("Done.");
+    return true;
   } catch (err) {
     showError(`Network/parse error: ${err}`);
     logStatus(`Failed: ${err}`, true);
+    return false;
   } finally {
     computeBtn.disabled = false;
   }
 }
-
-// ---- Building footprint (reuses lastBuildable/currentVertices from the site plot above) ----
-
-function footprintSideCount() {
-  return parseInt(footprintSidesCountEl.value, 10) || 4;
-}
-
-function pointInPolygon(pt, poly) {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x, yi = poly[i].y;
-    const xj = poly[j].x, yj = poly[j].y;
-    const intersect = (yi > pt.y) !== (yj > pt.y) &&
-      pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function buildNotchedRectangle(w, h, cornerFlags, cornerNotchFrac, midEdgeFlags, midNotchFrac, midDepthFrac) {
-  // The one generator behind every template shape. cornerFlags/midEdgeFlags are each
-  // [bottom-edge-or-corner, right, top, left] booleans (corner index c sits between edge
-  // c-1 and edge c, in the same CCW order as the edges).
-  //   - A flagged CORNER replaces that single vertex with a 3-point inward step (+2 net
-  //     vertices) - this alone makes an L (1 corner), a T or Z (2 corners, adjacent or
-  //     opposite), or a plus (all 4 corners).
-  //   - A flagged EDGE inserts an isolated notch in the middle of that edge, touching
-  //     neither of its corners (+4 net vertices, 2 of them concave) - this is the real
-  //     U-shape: a slot cut into one side, not a corner cut at all.
-  //   - Both kinds compose freely (e.g. one corner notch + one mid-edge notch on a
-  //     different, non-adjacent edge), which is what makes the 10-sided combinations work.
-  const corners = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
-  const nx = w * cornerNotchFrac, ny = h * cornerNotchFrac;
-  const cornerDetour = (c) => {
-    if (c === 0) return [{ x: 0, y: ny }, { x: nx, y: ny }, { x: nx, y: 0 }];
-    if (c === 1) return [{ x: w - nx, y: 0 }, { x: w - nx, y: ny }, { x: w, y: ny }];
-    if (c === 2) return [{ x: w, y: h - ny }, { x: w - nx, y: h - ny }, { x: w - nx, y: h }];
-    return [{ x: nx, y: h }, { x: nx, y: h - ny }, { x: 0, y: h - ny }];
-  };
-  // Where an edge actually starts/ends once its bounding corner's own notch (if any) is
-  // accounted for - NOT the raw corner position. Without this, a mid-edge notch placed on
-  // an edge whose corner is ALSO notched would measure from the wrong point and could
-  // overlap or cross the corner notch - this is what lets corner- and edge-notches combine
-  // freely on the higher side counts instead of only on carefully-chosen "safe" edges.
-  const edgeStart = (c) => (cornerFlags[c] ? cornerDetour(c)[cornerDetour(c).length - 1] : corners[c]);
-  const edgeEnd = (c) => (cornerFlags[c] ? cornerDetour(c)[0] : corners[c]);
-  const pts = [];
-  for (let e = 0; e < 4; e++) {
-    if (cornerFlags[e]) pts.push(...cornerDetour(e));
-    else pts.push(corners[e]);
-    if (midEdgeFlags[e]) {
-      const from = edgeStart(e), to = edgeEnd((e + 1) % 4);
-      const dx = to.x - from.x, dy = to.y - from.y;
-      const len = Math.hypot(dx, dy);
-      const ux = dx / len, uy = dy / len;
-      const inX = -uy, inY = ux; // 90deg CCW rotation of the edge direction = inward, for a CCW polygon
-      const nw = len * midNotchFrac;
-      const depth = (e % 2 === 0 ? h : w) * midDepthFrac;
-      const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
-      const n1 = { x: mid.x - ux * (nw / 2), y: mid.y - uy * (nw / 2) };
-      const n2 = { x: n1.x + inX * depth, y: n1.y + inY * depth };
-      const n3 = { x: n2.x + ux * nw, y: n2.y + uy * nw };
-      const n4 = { x: n3.x - inX * depth, y: n3.y - inY * depth };
-      pts.push(n1, n2, n3, n4);
-    }
-  }
-  return pts;
-}
-
-function popcount4(mask) {
-  return ((mask & 1) ? 1 : 0) + ((mask & 2) ? 1 : 0) + ((mask & 4) ? 1 : 0) + ((mask & 8) ? 1 : 0);
-}
-
-function maskToFlags(mask) {
-  return [0, 1, 2, 3].map((i) => !!(mask & (1 << i)));
-}
-
-function footprintTemplateVariants(n) {
-  // Every distinct, realizable arrangement of corner-notches and mid-edge-notches for this
-  // side count - a full enumeration (every subset of the 4 corners paired with every subset
-  // of the 4 edges that together add up to the required concave-vertex count), not a
-  // hand-picked pattern rotated around. A corner contributes 1 concave vertex (+2 total
-  // vertices, a 3-point inward step); a mid-edge notch contributes 2 concave vertices (+4
-  // total vertices, an isolated slot touching neither of that edge's corners) - so
-  // corners.length + 2*edges.length must equal k. "Change shape" cycles through this whole
-  // list, in order, so every combination is genuinely reachable.
-  const k = (n - 4) / 2;
-  if (!Number.isInteger(k) || k < 0) return null;
-  const variants = [];
-  for (let cMask = 0; cMask < 16; cMask++) {
-    const cCount = popcount4(cMask);
-    if (cCount > k) continue;
-    const remaining = k - cCount;
-    if (remaining % 2 !== 0) continue;
-    const eCount = remaining / 2;
-    if (eCount > 4) continue;
-    for (let eMask = 0; eMask < 16; eMask++) {
-      if (popcount4(eMask) !== eCount) continue;
-      variants.push({
-        corners: maskToFlags(cMask),
-        cornerFrac: 0.3,
-        mid: maskToFlags(eMask),
-        midFrac: 0.35,
-        midDepth: 0.22,
-        square: cCount === 4 && eCount === 0, // the pure plus/cross needs a square box to come out symmetric
-      });
-    }
-  }
-  return variants.length > 0 ? variants : null; // k > 12 isn't reachable with only 4 corners/4 edges
-}
-
-function computeDefaultFootprintVertices(n, buildableVertices, orientation) {
-  // A best-effort default shape that sits inside the buildable polygon - shrinks from 60% of
-  // the bounding box down until every vertex actually falls inside (handles narrow or concave
-  // buildable areas), falling back to a small square at the centroid.
-  const xs = buildableVertices.map((v) => v.x), ys = buildableVertices.map((v) => v.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const fullW = maxX - minX, fullH = maxY - minY;
-  const variants = footprintTemplateVariants(n);
-  if (!variants) return null; // more sides than these families cover (n > 12) - no template available
-  const template = variants[((orientation || 0) % variants.length + variants.length) % variants.length];
-
-  for (let scale = 0.6; scale > 0.08; scale -= 0.04) {
-    let w = fullW * scale, h = fullH * scale;
-    if (template.square) { const s = Math.min(w, h); w = s; h = s; }
-    const local = buildNotchedRectangle(w, h, template.corners, template.cornerFrac, template.mid, template.midFrac, template.midDepth);
-    const originX = cx - w / 2, originY = cy - h / 2;
-    const abs = local.map((p) => ({ x: p.x + originX, y: p.y + originY }));
-    if (abs.every((v) => pointInPolygon(v, buildableVertices))) {
-      return abs;
-    }
-  }
-  const c = centroidOf(buildableVertices);
-  return [
-    { x: c.x - 5, y: c.y - 5 }, { x: c.x + 5, y: c.y - 5 },
-    { x: c.x + 5, y: c.y + 5 }, { x: c.x - 5, y: c.y + 5 },
-  ];
-}
-
-function footprintVariantCount(n) {
-  const variants = footprintTemplateVariants(n);
-  return variants ? variants.length : 0;
-}
-
-function walkOpenPolygon(lengths, interiorAngles, start, startHeadingDeg) {
-  // Same turtle walk as the server's vertices_from_edges(), but WITHOUT the compass-rule
-  // closure correction - used only to visualize where a non-closing shape actually ends up,
-  // matching what the server just rejected.
-  const n = lengths.length;
-  const exteriorSumKnown = interiorAngles.reduce((s, a) => s + (180 - a), 0);
-  const exteriorLast = 360 - exteriorSumKnown;
-  const interiorLast = 180 - exteriorLast;
-  const allInterior = interiorAngles.concat([interiorLast]);
-
-  const pts = [{ x: start.x, y: start.y }];
-  let heading = startHeadingDeg;
-  let x = start.x, y = start.y;
-  for (let i = 0; i < n; i++) {
-    x += lengths[i] * Math.cos((heading * Math.PI) / 180);
-    y += lengths[i] * Math.sin((heading * Math.PI) / 180);
-    pts.push({ x, y });
-    if (i < n - 1) heading += 180 - allInterior[i];
-  }
-  return pts; // n+1 points: pts[0..n-1] are the placed vertices, pts[n] is where it actually ends up
-}
-
-function requiredCornerCounts(n) {
-  return { convex: (n + 4) / 2, concave: (n - 4) / 2 };
-}
-
-function readFootprintAngles() {
-  // Corner angles now come from the current template + orientation (see "Change shape"),
-  // not from per-row controls - hand-tuning 90/270 per vertex almost never produces a shape
-  // that actually closes, so there's nothing useful left to toggle here.
-  return footprintCurrentAngles;
-}
-
-function readFootprintLengths() {
-  return Array.from(footprintRowsEl.querySelectorAll(".footprint-length-input"))
-    .map((el) => displayToFeet(parseFloat(el.value) || 0));
-}
-
-function updateFootprintCornerNote() {
-  const n = footprintSideCount();
-  if (n % 2 !== 0 || n < 4) {
-    footprintCornerNoteEl.textContent = `Footprint needs an even number of sides, 4 or more (got ${n}).`;
-    footprintCornerNoteEl.classList.add("closure-error");
-    return false;
-  }
-  const { convex, concave } = requiredCornerCounts(n);
-  const angles = readFootprintAngles();
-  const actualConvex = angles.filter((a) => a === 90).length;
-  const actualConcave = angles.filter((a) => a === 270).length;
-  const ok = actualConvex === convex && actualConcave === concave;
-  footprintCornerNoteEl.textContent =
-    `Corners needed for a closed ${n}-sided footprint: ${convex} × 90°, ${concave} × 270°. ` +
-    `Currently set: ${actualConvex} × 90°, ${actualConcave} × 270°.`;
-  footprintCornerNoteEl.classList.toggle("closure-error", !ok);
-  return ok;
-}
-
-function buildFootprintRows(seed) {
-  const n = footprintSideCount();
-  const labels = labelsFor(n);
-  footprintCurrentAngles = seed && seed.angles ? seed.angles : new Array(n).fill(90);
-  footprintRowsEl.innerHTML = "";
-  for (let i = 0; i < n; i++) {
-    const defaultLen = seed && seed.lengths ? seed.lengths[i] : displayToFeet(10);
-    const angle = footprintCurrentAngles[i];
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td><strong>${labels[i]}</strong></td>` +
-      `<td>${angle}&deg;${angle === 270 ? " (notch)" : ""}</td>` +
-      `<td>${labels[i]} → ${labels[(i + 1) % n]}</td>` +
-      `<td><input type="number" class="footprint-length-input" min="0.1" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>`;
-    footprintRowsEl.appendChild(tr);
-  }
-  updateFootprintCornerNote();
-}
-
-function readFootprintIrregularLengths() {
-  return Array.from(footprintIrregularRowsEl.querySelectorAll(".footprint-irregular-length-input"))
-    .map((el) => displayToFeet(parseFloat(el.value) || 0));
-}
-
-function readFootprintDiagonalsList() {
-  return Array.from(footprintDiagonalRowsEl.querySelectorAll(".footprint-diagonal-input"))
-    .map((el) => displayToFeet(parseFloat(el.value) || 0));
-}
-
-function buildFootprintIrregularRows(seed) {
-  const n = footprintSideCount();
-  const labels = labelsFor(n);
-  footprintIrregularRowsEl.innerHTML = "";
-  for (let i = 0; i < n; i++) {
-    const defaultLen = seed && seed.lengths ? seed.lengths[i] : displayToFeet(10);
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td>${labels[i]} → ${labels[(i + 1) % n]}</td>` +
-      `<td><input type="number" class="footprint-irregular-length-input" min="0.01" step="any" value="${feetToDisplay(defaultLen).toFixed(2)}" /></td>`;
-    footprintIrregularRowsEl.appendChild(tr);
-  }
-}
-
-function buildFootprintDiagonalRows(seedVertices) {
-  // Mirrors the site plot's own diagonals-from-corner-A section exactly (same N-3 rule,
-  // same fan triangulation) - just scoped to the footprint's own table/note elements.
-  const n = footprintSideCount();
-  const labels = labelsFor(n);
-  footprintDiagonalRowsEl.innerHTML = "";
-  const count = diagonalCount(n);
-  if (count === 0) {
-    footprintDiagonalsTableEl.style.display = "none";
-    footprintDiagonalsNoteEl.textContent = "None needed - 3 sides alone fully determine a triangle.";
-    return;
-  }
-  footprintDiagonalsNoteEl.textContent =
-    `${count} diagonal(s) needed from corner ${labels[0]} to fully determine this ${n}-sided shape - ` +
-    `seeded below to match a regular-ish starting shape, adjust as needed.`;
-  footprintDiagonalsTableEl.style.display = "table";
-  for (let k = 2; k <= n - 2; k++) {
-    const tr = document.createElement("tr");
-    const seedDist = seedVertices
-      ? Math.hypot(seedVertices[k].x - seedVertices[0].x, seedVertices[k].y - seedVertices[0].y)
-      : displayToFeet(14);
-    tr.innerHTML =
-      `<td>${labels[0]}-${labels[k]}</td>` +
-      `<td><input type="number" class="footprint-diagonal-input" min="0.01" step="any" value="${feetToDisplay(seedDist).toFixed(2)}" /></td>`;
-    footprintDiagonalRowsEl.appendChild(tr);
-  }
-}
-
-function seedFootprintIrregular(n, seedVertices) {
-  // Seeds the irregular edge/diagonal inputs - from an existing footprint shape's actual
-  // vertices when one exists (e.g. switching the checkbox on keeps whatever was already
-  // drawn), or from a plain regular-polygon walk otherwise, exactly like the site plot's own
-  // "freeze the current shape, just seed diagonals from it" behaviour.
-  let vertices = seedVertices;
-  if (!vertices || vertices.length !== n) {
-    const regularAngle = ((n - 2) * 180) / n;
-    vertices = walkRegular(new Array(n).fill(displayToFeet(10)), regularAngle);
-  }
-  const lengths = vertices.map((v, i) => {
-    const next = vertices[(i + 1) % n];
-    return Math.hypot(next.x - v.x, next.y - v.y);
-  });
-  buildFootprintIrregularRows({ lengths });
-  buildFootprintDiagonalRows(vertices);
-  // The seeded shape always closes by construction (either a fresh regular-polygon walk, or
-  // the exact vertices already on screen) - show it right away instead of waiting for a
-  // manual click, matching the rectilinear side's own auto-preview behaviour.
-  if (lastBuildable) previewFootprint();
-}
-
-function footprintSolveIrregular() {
-  const n = footprintSideCount();
-  const lengths = readFootprintIrregularLengths();
-  if (lengths.length !== n || lengths.some((l) => !l || l <= 0)) {
-    return { ok: false, error: "Every side needs a length greater than zero." };
-  }
-  const diagonals = readFootprintDiagonalsList();
-  return solveFromDiagonals(lengths, diagonals);
-}
-
-function seedFootprintTemplate(n) {
-  // Generates an actual valid, already-closing shape (not just placeholder numbers) for the
-  // given side count - a rectangle, L, T, or plus, sized and positioned to sit inside the
-  // current buildable area - then derives the length/angle values that reproduce it, so
-  // "Preview footprint" (or the auto-preview below) succeeds immediately instead of the user
-  // having to hand-fix lengths for a shape the count-check alone can't fully validate.
-  if (!lastBuildable) return;
-  const vertices = computeDefaultFootprintVertices(n, lastBuildable, footprintOrientation);
-  if (!vertices) {
-    // No ready-made template beyond 20 sides - fall back to plain placeholder values the
-    // user can adjust by hand, same as before this feature existed.
-    buildFootprintRows();
-    return;
-  }
-  const count = vertices.length;
-  const lengths = vertices.map((v, i) => {
-    const next = vertices[(i + 1) % count];
-    return Math.hypot(next.x - v.x, next.y - v.y);
-  });
-  const angles = interiorAnglesFromVertices(vertices).map((a) => Math.round(a));
-  footprintStartXEl.value = feetToDisplay(vertices[0].x).toFixed(2);
-  footprintStartYEl.value = feetToDisplay(vertices[0].y).toFixed(2);
-  buildFootprintRows({ lengths, angles });
-  // Visible right away, not just sitting in the form fields waiting for a manual click - run
-  // it through the same validated /compute-footprint round trip immediately so it's drawn
-  // and contained-checked already.
-  previewFootprint();
-}
-
-function initFootprintDefaults() {
-  if (!lastBuildable || footprintDefaultsInitialized) return;
-  footprintDefaultsInitialized = true;
-  footprintPlaceholderNoteEl.style.display = "none";
-  footprintPreviewBtn.disabled = false;
-  changeShapeBtn.disabled = false;
-  footprintSidesCountEl.value = 4;
-  footprintOrientation = 0;
-  seedFootprintTemplate(4);
-}
-
-function drawFootprintPreview() {
-  if (!currentVertices) return;
-  const gapPts = lastFootprintGapWalk || [];
-  const boundsSource = currentVertices.concat(lastFootprintVertices || []).concat(gapPts);
-  const transform = svgTransformFor(boundsSource);
-  let svg = `<polygon points="${polygonPoints(transform, currentVertices)}" fill="none" stroke="#1f2430" stroke-width="2" />`;
-  if (lastBuildable && lastBuildable.length >= 3) {
-    svg += `<polygon points="${polygonPoints(transform, lastBuildable)}" fill="none" stroke="#999999" stroke-width="1.5" stroke-dasharray="6,4" />`;
-  }
-  if (gapPts.length >= 2) {
-    const labels = labelsFor(gapPts.length - 1);
-    const placed = gapPts.slice(0, -1);
-    const rawEnd = gapPts[gapPts.length - 1];
-    const start = gapPts[0];
-    const walkedPath = gapPts.map((p, i) => `${i === 0 ? "M" : "L"}${transform(p).x.toFixed(1)},${transform(p).y.toFixed(1)}`).join(" ");
-    svg += `<path d="${walkedPath}" fill="none" stroke="#1a5fb4" stroke-width="2" />`;
-    const pStart = transform(start), pEnd = transform(rawEnd);
-    svg += `<line x1="${pEnd.x.toFixed(1)}" y1="${pEnd.y.toFixed(1)}" x2="${pStart.x.toFixed(1)}" y2="${pStart.y.toFixed(1)}" ` +
-      `stroke="#c0392b" stroke-width="2" stroke-dasharray="5,4" />`;
-    const gapLen = Math.hypot(rawEnd.x - start.x, rawEnd.y - start.y);
-    const mid = { x: (pEnd.x + pStart.x) / 2, y: (pEnd.y + pStart.y) / 2 };
-    svg += `<text x="${mid.x.toFixed(1)}" y="${(mid.y - 6).toFixed(1)}" font-size="11" font-weight="700" ` +
-      `fill="#c0392b" text-anchor="middle">Gap: ${feetToDisplay(gapLen).toFixed(2)} ${unitLabel()}</text>`;
-    placed.forEach((v, i) => {
-      const p = transform(v);
-      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#1a5fb4" />`;
-      svg += `<text x="${(p.x + 8).toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="12" font-weight="700" fill="#1a5fb4">${labels[i]}</text>`;
-    });
-  }
-  if (lastFootprintVertices && lastFootprintVertices.length >= 3) {
-    const n = lastFootprintVertices.length;
-    const labels = labelsFor(n);
-    const centroid = centroidOf(lastFootprintVertices);
-    svg += `<polygon points="${polygonPoints(transform, lastFootprintVertices)}" fill="rgba(26,95,180,0.08)" stroke="#1a5fb4" stroke-width="2" />`;
-    lastFootprintVertices.forEach((v, i) => {
-      const next = lastFootprintVertices[(i + 1) % n];
-      const length = Math.hypot(next.x - v.x, next.y - v.y);
-      const mid = { x: (v.x + next.x) / 2, y: (v.y + next.y) / 2 };
-      const dx = mid.x - centroid.x, dy = mid.y - centroid.y;
-      const dlen = Math.hypot(dx, dy) || 1;
-      const insidePoint = { x: mid.x - (dx / dlen) * 12, y: mid.y - (dy / dlen) * 12 };
-      const pInside = transform(insidePoint);
-      svg += `<text x="${pInside.x.toFixed(1)}" y="${pInside.y.toFixed(1)}" font-size="10.5" font-weight="600" ` +
-        `fill="#1a5fb4" text-anchor="middle" dominant-baseline="middle">${feetToDisplay(length).toFixed(2)} ${unitLabel()}</text>`;
-      const p = transform(v);
-      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#1a5fb4" />`;
-      svg += `<text x="${(p.x + 8).toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="12" font-weight="700" fill="#1a5fb4">${labels[i]}</text>`;
-    });
-  }
-  footprintSvgEl.innerHTML = svg;
-}
-
-function clearFootprintError() {
-  footprintErrorBoxEl.style.display = "none";
-  footprintErrorBoxEl.textContent = "";
-}
-
-function showFootprintError(msg) {
-  footprintErrorBoxEl.style.display = "block";
-  footprintErrorBoxEl.textContent = msg;
-}
-
-async function previewFootprint() {
-  clearFootprintError();
-  footprintAreaSummaryEl.style.display = "none";
-  if (!lastBuildable) {
-    showFootprintError("Compute the buildable area above first.");
-    return;
-  }
-  const n = footprintSideCount();
-  const irregular = footprintIrregularToggleEl.checked;
-
-  let lengths, interiorAngles;
-  if (irregular) {
-    if (n < 3) {
-      showFootprintError(`Number of sides must be at least 3 (got ${n}).`);
-      return;
-    }
-    const solved = footprintSolveIrregular();
-    if (!solved.ok) {
-      // A bad diagonal/length combo is a local geometry problem, not something the server
-      // needs to see - same as the site plot's own diagonal solver.
-      showFootprintError(solved.error);
-      return;
-    }
-    lengths = solved.vertices.map((v, i) => {
-      const next = solved.vertices[(i + 1) % n];
-      return Math.hypot(next.x - v.x, next.y - v.y);
-    });
-    interiorAngles = interiorAnglesFromVertices(solved.vertices).slice(1);
-  } else {
-    if (n % 2 !== 0 || n < 4) {
-      showFootprintError(`Number of sides must be even and at least 4 (got ${n}).`);
-      return;
-    }
-    if (!updateFootprintCornerNote()) {
-      showFootprintError("Corner angle counts don't add up to a closed shape yet - see the note above the table.");
-      return;
-    }
-    lengths = readFootprintLengths();
-    if (lengths.some((l) => !l || l <= 0)) {
-      showFootprintError("Every side needs a length greater than zero.");
-      return;
-    }
-    // Vertex A's angle is derived server-side, matching /compute-site's own convention
-    // (computeSite() above does the same actualAngles.slice(1)).
-    interiorAngles = readFootprintAngles().slice(1);
-  }
-
-  const body = {
-    lengths,
-    regular: false,
-    interior_angles: interiorAngles,
-    start: {
-      x: displayToFeet(parseFloat(footprintStartXEl.value) || 0),
-      y: displayToFeet(parseFloat(footprintStartYEl.value) || 0),
-    },
-    start_heading_deg: 0,
-    buildable: { vertices: lastBuildable },
-  };
-
-  footprintPreviewBtn.disabled = true;
-  footprintStatusNoteEl.textContent = "Validating...";
-  try {
-    const res = await fetch("/compute-footprint", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!data.success) {
-      showFootprintError(`[${data.stage || "error"}] ${data.error}`);
-      footprintStatusNoteEl.textContent = "";
-      // Show the actual gap instead of leaving the drawing blank - walk the same
-      // lengths/angles client-side (no closure correction) so the user can see exactly
-      // where the boundary stops short of closing.
-      lastFootprintVertices = null;
-      lastFootprintGapWalk = walkOpenPolygon(lengths, interiorAngles, body.start, 0);
-      drawFootprintPreview();
-      return;
-    }
-
-    lastFootprintGapWalk = null;
-    lastFootprintVertices = data.footprint.vertices;
-    drawFootprintPreview();
-    footprintStatusNoteEl.textContent = data.adjusted
-      ? `Closure auto-corrected (${data.closure_error_ft} ft error).`
-      : "Shape closed exactly.";
-
-    const footprintAreaSqft = polygonArea(lastFootprintVertices);
-    const au = areaUnitLabel();
-    let areaMsg = `<strong>Footprint area:</strong> ${sqFeetToDisplayArea(footprintAreaSqft).toFixed(1)} ${au} ` +
-      `(${kathaChatakText(footprintAreaSqft)})<br/>`;
-    if (data.contained) {
-      areaMsg += `<span style="color: var(--accent-dark); font-weight:700;">Fits entirely within the buildable area.</span>`;
-    } else {
-      areaMsg += `<span style="color: var(--danger); font-weight:700;">Extends outside the buildable area by ~` +
-        `${sqFeetToDisplayArea(data.violation_area_sqft).toFixed(1)} ${au}. Adjust the shape or start position.</span>`;
-    }
-    footprintAreaSummaryEl.innerHTML = areaMsg;
-    footprintAreaSummaryEl.style.display = "block";
-  } catch (err) {
-    showFootprintError(`Network/parse error: ${err}`);
-    footprintStatusNoteEl.textContent = "";
-  } finally {
-    footprintPreviewBtn.disabled = false;
-  }
-}
-
-footprintSidesCountEl.addEventListener("change", () => {
-  let n = footprintSideCount();
-  if (footprintIrregularToggleEl.checked) {
-    if (n < 3) n = 3;
-    footprintSidesCountEl.value = n;
-    seedFootprintIrregular(n, null);
-    return;
-  }
-  if (n < 4) n = 4;
-  if (n % 2 !== 0) n += 1;
-  footprintSidesCountEl.value = n;
-  footprintOrientation = 0;
-  if (lastBuildable) {
-    seedFootprintTemplate(n);
-  } else {
-    buildFootprintRows();
-    drawFootprintPreview();
-  }
-});
-footprintPreviewBtn.addEventListener("click", previewFootprint);
-changeShapeBtn.addEventListener("click", () => {
-  const n = footprintSideCount();
-  const count = footprintVariantCount(n) || 1;
-  footprintOrientation = (footprintOrientation + 1) % count;
-  seedFootprintTemplate(n);
-});
-footprintIrregularToggleEl.addEventListener("change", () => {
-  const irregular = footprintIrregularToggleEl.checked;
-  footprintRectilinearGroupEl.style.display = irregular ? "none" : "block";
-  changeShapeFieldEl.style.display = irregular ? "none" : "flex";
-  footprintIrregularGroupEl.style.display = irregular ? "block" : "none";
-  footprintCornerNoteEl.style.display = irregular ? "none" : "block";
-
-  if (irregular) {
-    // Sides no longer need to be even - an irregular footprint can have any shape, just
-    // like a triangle needs no diagonals at all.
-    footprintSidesCountEl.min = "3";
-    footprintSidesCountEl.step = "1";
-    let n = footprintSideCount();
-    if (n < 3) { n = 3; footprintSidesCountEl.value = n; }
-    // Keep whatever shape is already on screen as the starting point - freeze it into
-    // lengths/diagonals rather than resetting to a plain default, same as the site plot's
-    // own "uncheck regular, seed diagonals from the current shape" behaviour.
-    seedFootprintIrregular(n, lastFootprintVertices);
-  } else {
-    footprintSidesCountEl.min = "4";
-    footprintSidesCountEl.step = "2";
-    let n = footprintSideCount();
-    if (n < 4) n = 4;
-    if (n % 2 !== 0) n += 1;
-    footprintSidesCountEl.value = n;
-    footprintOrientation = 0;
-    if (lastBuildable) seedFootprintTemplate(n);
-  }
-});
 
 unitSelectEl.addEventListener("change", () => {
   const oldUnit = currentUnit;
@@ -1961,11 +1495,10 @@ unitSelectEl.addEventListener("change", () => {
     const v = parseFloat(el.value);
     if (!isNaN(v)) el.value = (v * factor).toFixed(2);
   };
-  document.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input, .footprint-length-input, .footprint-start-input").forEach(convert);
+  root.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input").forEach(convert);
   convert(roadExtensionEl);
 
   resolveAndRedraw();
-  drawFootprintPreview();
 });
 
 sidesCountEl.addEventListener("change", buildEdgeRows);
@@ -1999,26 +1532,10 @@ mouzaMapInputEl.addEventListener("change", async () => {
   }
 });
 
-previewPdfBtn.addEventListener("click", async () => {
-  pdfNoteEl.textContent = "Generating preview...";
-  previewPdfBtn.disabled = true;
-  try {
-    const doc = await generatePdf();
-    if (!doc) return;
-    pdfPreviewFrameEl.src = String(doc.output("bloburl"));
-    pdfPreviewFrameEl.style.display = "block";
-    downloadPdfBtn.disabled = false;
-    pdfNoteEl.textContent = "Preview ready.";
-  } catch (err) {
-    pdfNoteEl.textContent = `Failed: ${err}`;
-  } finally {
-    previewPdfBtn.disabled = false;
-  }
-});
-
-downloadPdfBtn.addEventListener("click", () => {
-  if (lastPdfDoc) lastPdfDoc.save("site_plan.pdf");
-});
+// "Refresh sheet preview" and the download button are both driven by the two-stage Print
+// Sheet flow at the bottom of this file (refreshSheetPreview / the stage-2 overlay), so the
+// single-shot handlers uttam-5 had here are gone - having both would render the sheet twice
+// per click.
 regularToggleEl.addEventListener("change", () => {
   regularNoteEl.style.display = regularToggleEl.checked ? "block" : "none";
   const rows = Array.from(edgeRowsEl.querySelectorAll("tr"));
@@ -2124,8 +1641,13 @@ function addRoadRow() {
   div.className = "road-row";
   div.dataset.roadUid = uid;
   div.style.cssText = "border:1px solid var(--border); border-radius:7px; padding:10px 12px; margin-top:10px;";
+  // Four fixed rows rather than one long wrapping row, so the fields group by what they are
+  // about and land in the same place at every pane width: identity, then the start endpoint,
+  // then the end endpoint, then the road's own dimensions plus Remove. The curve parameters
+  // get their own row under the identity row (they describe the shape picked there) and it is
+  // shown only for a curved road.
   div.innerHTML =
-    `<div class="row">` +
+    `<div class="row road-row-identity">` +
     `<div class="field"><label>Road name</label><input type="text" class="road-name-input" value="R${index + 1}" /></div>` +
     `<div class="field"><label>Road type</label><select class="road-type-select">` +
     `<option value="spine">Spine</option><option value="loop">Loop</option>` +
@@ -2134,9 +1656,22 @@ function addRoadRow() {
     `<div class="field"><label>Shape</label><select class="road-shape-select">` +
     `<option value="straight">Straight</option><option value="curved">Curved</option>` +
     `</select></div>` +
+    `</div>` +
+
+    `<div class="row road-row-curve" style="display:none;">` +
+    `<div class="field road-curve-bulge"><label>Curve bulge (ft)</label>` +
+    `<input type="number" class="road-bulge-input" step="any" min="0" value="${feetToDisplay(10).toFixed(2)}" /></div>` +
+    `<div class="field road-curve-direction"><label>Curve direction</label>` +
+    `<select class="road-direction-select"><option value="left">Left of travel</option><option value="right">Right of travel</option></select></div>` +
+    `</div>` +
+
+    `<div class="row road-row-start">` +
     `<div class="field"><label>Start</label><select class="road-start-select"></select></div>` +
     `<div class="field"><label class="road-start-distance-label">Distance (ft)</label>` +
     `<input type="number" class="road-start-distance-input" step="any" /></div>` +
+    `</div>` +
+
+    `<div class="row road-row-end">` +
     `<div class="field"><label>End</label><select class="road-end-select"></select></div>` +
     `<div class="field road-end-distance-field"><label class="road-end-distance-label">Distance (ft)</label>` +
     `<input type="number" class="road-end-distance-input" step="any" /></div>` +
@@ -2144,12 +1679,11 @@ function addRoadRow() {
     `<input type="number" class="road-deadend-length-input" step="any" min="0.1" value="${feetToDisplay(30).toFixed(2)}" /></div>` +
     `<div class="field road-deadend-direction" style="display:none;"><label>Perpendicular to side</label>` +
     `<select class="road-deadend-direction-select"></select></div>` +
+    `</div>` +
+
+    `<div class="row road-row-size">` +
     `<div class="field"><label>Width (ft)</label><input type="number" class="road-width-input" step="any" min="0.1" value="${feetToDisplay(12).toFixed(2)}" /></div>` +
     `<div class="field"><label>Buffer (ft)</label><input type="number" class="road-buffer-input" step="any" min="0" value="0" /></div>` +
-    `<div class="field road-curve-bulge" style="display:none;"><label>Curve bulge (ft)</label>` +
-    `<input type="number" class="road-bulge-input" step="any" min="0" value="${feetToDisplay(10).toFixed(2)}" /></div>` +
-    `<div class="field road-curve-direction" style="display:none;"><label>Curve direction</label>` +
-    `<select class="road-direction-select"><option value="left">Left of travel</option><option value="right">Right of travel</option></select></div>` +
     `<div class="field"><label>&nbsp;</label><button type="button" class="secondary road-remove-btn">Remove road</button></div>` +
     `</div>`;
   roadRowsEl.appendChild(div);
@@ -2166,8 +1700,7 @@ function addRoadRow() {
   const widthInput = div.querySelector(".road-width-input");
   const bufferInput = div.querySelector(".road-buffer-input");
   const shapeSelect = div.querySelector(".road-shape-select");
-  const curveBulgeField = div.querySelector(".road-curve-bulge");
-  const curveDirectionField = div.querySelector(".road-curve-direction");
+  const curveRow = div.querySelector(".road-row-curve");
   const bulgeInput = div.querySelector(".road-bulge-input");
   const directionSelect = div.querySelector(".road-direction-select");
   const deadendLengthField = div.querySelector(".road-deadend-length");
@@ -2200,9 +1733,7 @@ function addRoadRow() {
     endDistanceField.style.display = isDeadEnd ? "none" : "flex";
   }
   function updateCurveVisibility() {
-    const isCurved = shapeSelect.value === "curved";
-    curveBulgeField.style.display = isCurved ? "flex" : "none";
-    curveDirectionField.style.display = isCurved ? "flex" : "none";
+    curveRow.style.display = shapeSelect.value === "curved" ? "flex" : "none";
   }
   reseedStartDistance();
   updateDeadendVisibility();
@@ -2775,6 +2306,25 @@ async function insertPlotsForSubsection(sub) {
     // expected behaviour, not something to alarm the user with on every insert.
     generationNotes: frontagePlots.length === 0 ? (data.generationNotes || []) : [],
   };
+
+  // Step-level severity for the shared message area: a sub-section the solver couldn't place
+  // any road-facing plot in, or one that came back with an invariant complaint, is a warning
+  // the user should look at - a normal insert is just informational.
+  if ((sub.invariantErrors || []).length) {
+    setMessage(`Sub-section ${sub.index + 1}: ${sub.invariantErrors[0]}`, "warning");
+  } else if (frontagePlots.length === 0) {
+    const why = (sub.details.generationNotes || [])[0];
+    setMessage(
+      `Sub-section ${sub.index + 1}: no road-facing plots could be placed${why ? ` - ${why}` : ""}.`,
+      "warning",
+    );
+  } else {
+    setMessage(
+      `Sub-section ${sub.index + 1}: ${frontagePlots.length} road-facing plot(s) + ` +
+      `${plots.length - frontagePlots.length} fill plot(s) inserted.`,
+      "info",
+    );
+  }
 }
 
 // Real plots keep a permanent S{sub}P{n} name, assigned once, so the plot editor can keep
@@ -2878,10 +2428,9 @@ function buildSubsectionRow(sub) {
     `<h3 style="font-size:14px; margin: 0 0 8px;">Sub-section ${sub.index + 1}</h3>` +
     `<div class="row">` +
     field("Min number of plots", "sub-min-plots", 1) +
-    field(`Max length (${unitLabel()})`, "sub-max-length", feetToDisplay(60).toFixed(1)) +
-    field(`Min length (${unitLabel()})`, "sub-min-length", feetToDisplay(40).toFixed(1)) +
-    field(`Max width (${unitLabel()})`, "sub-max-width", feetToDisplay(50).toFixed(1)) +
-    field(`Min width (${unitLabel()})`, "sub-min-width", feetToDisplay(30).toFixed(1)) +
+    field(`Plot length (${unitLabel()})`, "sub-plot-length", feetToDisplay(50).toFixed(1)) +
+    field(`Plot width (${unitLabel()})`, "sub-plot-width", feetToDisplay(40).toFixed(1)) +
+    field(`Max range (${unitLabel()})`, "sub-max-range", feetToDisplay(5).toFixed(1)) +
     `</div><div class="row" style="margin-top:8px;">` +
     field(`Min gap between two plots (${unitLabel()})`, "sub-min-gap", feetToDisplay(0).toFixed(1)) +
     field(`Plot roadside threshold (${unitLabel()})`, "sub-road-threshold", feetToDisplay(5).toFixed(1)) +
@@ -2891,16 +2440,27 @@ function buildSubsectionRow(sub) {
   subsectionRowsEl.appendChild(div);
 
   sub.detailsEl = div.querySelector(".sub-details");
-  const readParams = () => ({
-    minPlots: parseInt(div.querySelector(".sub-min-plots").value, 10) || 0,
-    maxLength: displayToFeet(parseFloat(div.querySelector(".sub-max-length").value) || 0),
-    minLength: displayToFeet(parseFloat(div.querySelector(".sub-min-length").value) || 0),
-    maxWidth: displayToFeet(parseFloat(div.querySelector(".sub-max-width").value) || 0),
-    minWidth: displayToFeet(parseFloat(div.querySelector(".sub-min-width").value) || 0),
-    minGap: displayToFeet(parseFloat(div.querySelector(".sub-min-gap").value) || 0),
-    roadThreshold: displayToFeet(parseFloat(div.querySelector(".sub-road-threshold").value) || 0),
-    maxPlots: null,
-  });
+  // "Plot length"/"Plot width" is the target size the user actually thinks in; "Max range" is
+  // how far above/below that target a plot may land - e.g. length=30, width=20, range=5 gives
+  // the same maxLength=35/minLength=25/maxWidth=25/minWidth=15 the backend has always wanted,
+  // without asking the user to keep two numbers per dimension in sync by hand. `insert_plots`'s
+  // own sizing contract (minLength/maxLength/minWidth/maxWidth) is unchanged server-side - this
+  // is purely how the two values feeding it are entered.
+  const readParams = () => {
+    const length = displayToFeet(parseFloat(div.querySelector(".sub-plot-length").value) || 0);
+    const width = displayToFeet(parseFloat(div.querySelector(".sub-plot-width").value) || 0);
+    const range = Math.max(0, displayToFeet(parseFloat(div.querySelector(".sub-max-range").value) || 0));
+    return {
+      minPlots: parseInt(div.querySelector(".sub-min-plots").value, 10) || 0,
+      maxLength: length + range,
+      minLength: Math.max(0, length - range),
+      maxWidth: width + range,
+      minWidth: Math.max(0, width - range),
+      minGap: displayToFeet(parseFloat(div.querySelector(".sub-min-gap").value) || 0),
+      roadThreshold: displayToFeet(parseFloat(div.querySelector(".sub-road-threshold").value) || 0),
+      maxPlots: null,
+    };
+  };
 
   div.querySelector(".sub-insert-btn").addEventListener("click", async () => {
     sub.params = readParams();
@@ -2920,8 +2480,9 @@ function buildSubsectionRow(sub) {
 
 finalizeRoadLogicBtn.addEventListener("click", async () => {
   if (!currentVertices) {
-    finalizeRoadLogicNoteEl.textContent = "Compute the buildable area on the Site plan page first.";
+    finalizeRoadLogicNoteEl.textContent = "Finalize the Metes & Bounds step first.";
     finalizeRoadLogicNoteEl.classList.add("closure-error");
+    setMessage("Finish Metes & Bounds first - there's no plot boundary to carve roads into yet.", "error");
     return;
   }
   finalizeRoadLogicBtn.disabled = true;
@@ -2945,17 +2506,20 @@ finalizeRoadLogicBtn.addEventListener("click", async () => {
     if (!data.success) {
       finalizeRoadLogicNoteEl.textContent = `[${data.stage || "error"}] ${data.error}`;
       finalizeRoadLogicNoteEl.classList.add("closure-error");
+      setMessage(`[${data.stage || "error"}] ${data.error}`, "error");
       return;
     }
     subsections = data.subsections.map((s, i) => ({ vertices: s.vertices, index: i, params: null, plots: [], details: null, detailsEl: null }));
     subsectionRowsEl.innerHTML = "";
     subsections.forEach((sub) => buildSubsectionRow(sub));
     finalizeRoadLogicNoteEl.textContent = `${subsections.length} sub-section(s) found.`;
-    plotLogicCardEl.style.display = "block";
     drawPlotLogicPreview();
+    setMessage(`Road logic finalized - ${subsections.length} sub-section(s) found.`, "info");
+    advanceFrom("road");
   } catch (err) {
     finalizeRoadLogicNoteEl.textContent = `Network/parse error: ${err}`;
     finalizeRoadLogicNoteEl.classList.add("closure-error");
+    setMessage(`Network/parse error: ${err}`, "error");
   } finally {
     finalizeRoadLogicBtn.disabled = false;
   }
@@ -3639,6 +3203,7 @@ function drawPlotEditorPreview() {
     });
   });
   plotEditorSvgEl.innerHTML = svg;
+  lastEditorTransform = transform; // so a click on the drawing can be mapped back to feet
 }
 
 // Simple O(n^2) non-adjacent segment-intersection check - plots here are always small polygons
@@ -3820,6 +3385,7 @@ savePlotBtnEl.addEventListener("click", async () => {
     plot.area = previousArea;
     savePlotNoteEl.textContent = `Bad geometry warning: ${data.invariantErrors[0]} - the save was rolled back.`;
     savePlotNoteEl.classList.add("closure-error");
+    setMessage(`${data.invariantErrors[0]} - the save was rolled back.`, "error");
     return;
   }
 
@@ -3841,21 +3407,24 @@ finalizePlotLogicBtn.addEventListener("click", () => {
   if (!subsections.length) {
     finalizePlotLogicNoteEl.textContent = "Finalize road logic first so there are sub-sections to fill.";
     finalizePlotLogicNoteEl.classList.add("closure-error");
+    setMessage("Finish Road Logic first - there are no sub-sections to fill yet.", "error");
     return;
   }
   const notReady = subsections.filter((s) => !s.details || s.details.error);
   if (notReady.length) {
-    finalizePlotLogicNoteEl.textContent =
+    const msg =
       `Insert plots for every sub-section first - Sub-section ${notReady.map((s) => s.index + 1).join(", ")} ` +
       `${notReady.length > 1 ? "haven't" : "hasn't"} been filled yet.`;
+    finalizePlotLogicNoteEl.textContent = msg;
     finalizePlotLogicNoteEl.classList.add("closure-error");
+    setMessage(msg, "error");
     return;
   }
   finalizePlotLogicNoteEl.textContent = "";
   finalizePlotLogicNoteEl.classList.remove("closure-error");
-  plotEditorCardEl.style.display = "block";
   drawPlotEditorPreview();
-  plotEditorCardEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  setMessage("Plot logic finalized - click any real plot on the drawing to edit it.", "info");
+  advanceFrom("plots");
 });
 
 // Locks in a clean, combined presentation of every sub-section's plots together, plus totals
@@ -3866,14 +3435,17 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
   if (!subsections.length) {
     finalizeMasterPlanNoteEl.textContent = "Finalize road logic first so there are sub-sections to fill.";
     finalizeMasterPlanNoteEl.classList.add("closure-error");
+    setMessage("Finish Road Logic first - there are no sub-sections to fill yet.", "error");
     return;
   }
   const notReady = subsections.filter((s) => !s.details || s.details.error);
   if (notReady.length) {
-    finalizeMasterPlanNoteEl.textContent =
+    const msg =
       `Insert plots for every sub-section first - Sub-section ${notReady.map((s) => s.index + 1).join(", ")} ` +
       `${notReady.length > 1 ? "haven't" : "hasn't"} been filled yet.`;
+    finalizeMasterPlanNoteEl.textContent = msg;
     finalizeMasterPlanNoteEl.classList.add("closure-error");
+    setMessage(msg, "error");
     return;
   }
 
@@ -3907,47 +3479,457 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
   masterPlanSummaryEl.innerHTML = lines.join("<br/>");
   masterPlanSummaryEl.style.display = "block";
   masterPlanCardEl.style.display = "block";
-  masterPlanCardEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  setMessage("Master plan finalized - set the drawing's north orientation next.", "info");
+  advanceFrom("editor");
 });
+  // =======================================================================================
+  // Shared shell behaviour. Same code for both tools; separate state per instance.
+  // =======================================================================================
 
-// ---- Wizard page navigation (step-nav pills) ----
-function showWizardPage(step) {
-  document.querySelectorAll(".wizard-page").forEach((el) => {
-    el.style.display = el.id === `wizardPage${step}` ? "block" : "none";
+  // ---- Zoom / pan --------------------------------------------------------------------
+  // One wrapper around whatever SVG the current step renders - deliberately NOT implemented
+  // per step. Zoom/pan survives editing fields on the same tab (that is the whole point: watch
+  // a change land without losing your zoom) and resets to 100% on every tab switch.
+  const ZOOM_MIN = 0.4, ZOOM_MAX = 8, ZOOM_FACTOR = 1.25;
+  let zoom = 1, panX = 0, panY = 0;
+
+  function applyZoom() {
+    zoomCanvasEl.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
+  }
+  function resetZoom() {
+    zoom = 1; panX = 0; panY = 0;
+    // Also disarm a pan's click-suppression: the browser fires that synthetic click straight
+    // after the gesture, so anything still armed by the time we reset (a tab switch, a Fit
+    // click) is stale and would otherwise swallow a genuine selection click later on.
+    suppressNextClick = false;
+    applyZoom();
+  }
+  function setZoom(next) {
+    zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+    applyZoom();
+  }
+  $("zoomInBtn").addEventListener("click", () => setZoom(zoom * ZOOM_FACTOR));
+  $("zoomOutBtn").addEventListener("click", () => setZoom(zoom / ZOOM_FACTOR));
+  $("zoomFitBtn").addEventListener("click", resetZoom);
+
+  // Click-drag to pan. A pan that actually moved must not also register as a plot click in
+  // the Plot Editor, so it arms `suppressNextClick` for exactly the one click the browser
+  // synthesises at the end of that gesture. (Latching on `dragMoved` alone instead would stay
+  // armed forever after the first pan and silently eat every later selection click.)
+  let dragging = false, dragStartX = 0, dragStartY = 0, dragMoved = false;
+  let suppressNextClick = false;
+  zoomViewportEl.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || zoomControlsEl.contains(ev.target)) return;
+    if (zoomViewportEl.classList.contains("no-zoom")) return;   // e.g. the sheet-preview iframe
+    dragging = true;
+    dragMoved = false;
+    dragStartX = ev.clientX - panX;
+    dragStartY = ev.clientY - panY;
+    zoomViewportEl.setPointerCapture(ev.pointerId);
+    zoomViewportEl.classList.add("panning");
   });
-  document.querySelectorAll(".step-nav .step-pill").forEach((pill) => {
-    if (pill.classList.contains("todo")) return;
-    pill.classList.toggle("active", pill.dataset.step === String(step));
+  zoomViewportEl.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    const nx = ev.clientX - dragStartX, ny = ev.clientY - dragStartY;
+    if (Math.abs(nx - panX) > 2 || Math.abs(ny - panY) > 2) dragMoved = true;
+    panX = nx; panY = ny;
+    applyZoom();
   });
-  // The site plot/final site plan cards and the print sheet live outside the wizard-page
-  // toggle entirely (one shared set of cards, not a duplicate per page) since the master plan
-  // is built directly on top of the same site plan, not a separate thing - shown under either
-  // of those two steps, hidden under Footprint/Floors where they don't belong yet.
-  const stepStr = String(step);
-  const showShared = stepStr === "2" || stepStr === "masterplan";
-  document.querySelectorAll(".shared-with-masterplan").forEach((el) => {
-    el.style.display = showShared ? "block" : "none";
+  const endDrag = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    if (dragMoved) suppressNextClick = true;
+    dragMoved = false;
+    zoomViewportEl.classList.remove("panning");
+    try { zoomViewportEl.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+  };
+  zoomViewportEl.addEventListener("pointerup", endDrag);
+  zoomViewportEl.addEventListener("pointercancel", endDrag);
+
+  // ---- Step navigation and gating ----------------------------------------------------
+  const stepOrder = def.steps.map((s) => s.key);
+  const stepLabel = (key) => (def.steps.find((s) => s.key === key) || {}).label || key;
+  const finalized = {};              // step key -> true once that step's finalize succeeded
+  let currentStep = null;
+  const tabEls = {};
+
+  // The first step the user hasn't finalized yet is the one that is actually editable.
+  // Everything before it is a finished step shown read-only; everything after it is locked.
+  function firstOpenIndex() {
+    for (let i = 0; i < stepOrder.length; i++) {
+      if (!finalized[stepOrder[i]]) return i;
+    }
+    return stepOrder.length - 1;
+  }
+
+  // Which earlier step is blocking `key`, if any - named explicitly so a locked tab can say
+  // "Finish Road Logic first" rather than just "locked".
+  function blockerFor(key) {
+    const target = stepOrder.indexOf(key);
+    for (let i = 0; i < target; i++) {
+      if (!finalized[stepOrder[i]]) return stepOrder[i];
+    }
+    return null;
+  }
+
+  function buildTabs() {
+    stepTabsEl.innerHTML = "";
+    def.steps.forEach((s) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "step-tab";
+      tab.dataset.step = s.key;
+      tab.textContent = s.label;
+      tab.addEventListener("click", () => {
+        const blocker = blockerFor(s.key);
+        if (blocker) {
+          // A disabled tab does not navigate - it explains itself in the same message area
+          // every other step-level error uses.
+          setMessage(`Finish ${stepLabel(blocker)} first - ${s.label} isn't reachable until it's finalized.`, "error");
+          return;
+        }
+        goToStep(s.key);
+      });
+      stepTabsEl.appendChild(tab);
+      tabEls[s.key] = tab;
+    });
+  }
+
+  function refreshTabs() {
+    const open = firstOpenIndex();
+    stepOrder.forEach((key, i) => {
+      const tab = tabEls[key];
+      const locked = !!blockerFor(key);
+      tab.classList.toggle("locked", locked);
+      tab.classList.toggle("done", i < open);
+      tab.classList.toggle("active", key === currentStep);
+      tab.setAttribute("aria-disabled", locked ? "true" : "false");
+    });
+  }
+
+  // Revisiting an already-finalized step is a read-only view: this task builds no
+  // invalidation cascade, so re-opening a finished step for editing would let a later step's
+  // data silently disagree with the earlier step it was derived from.
+  // `scope` is the live layout (form host + action bar), NOT the step node - by the time this
+  // runs the step's slots have already been moved into the split layout, so querying the step
+  // node itself would find nothing and silently leave a finalized step fully editable.
+  function setStepReadOnly(scopes, on) {
+    scopes.forEach((scope) => scope.querySelectorAll("input, select, textarea, button").forEach((el) => {
+      if (on) {
+        if (el.dataset.origDisabled === undefined) el.dataset.origDisabled = el.disabled ? "1" : "0";
+        el.disabled = true;
+      } else if (el.dataset.origDisabled !== undefined) {
+        el.disabled = el.dataset.origDisabled === "1";
+        delete el.dataset.origDisabled;
+      }
+    }));
+  }
+
+  function goToStep(key) {
+    if (currentStep === key) return;
+    // Park the outgoing step's slots back on their own node so its values/listeners survive.
+    if (currentStep) {
+      const prev = stepNodes[currentStep];
+      ["step-diagram", "step-legend", "step-actions", "step-form", "step-extra-left"].forEach((cls) => {
+        const slot = root.querySelector(`.${cls}[data-owner="${currentStep}"]`);
+        if (slot) prev.appendChild(slot);
+      });
+    }
+    currentStep = key;
+    const node = stepNodes[key];
+    const move = (cls, target) => {
+      const slot = node.querySelector(`:scope > .${cls}`);
+      target.innerHTML = "";
+      if (slot) {
+        slot.dataset.owner = key;
+        target.appendChild(slot);
+      }
+    };
+    move("step-diagram", zoomCanvasEl);
+    move("step-legend", legendHostEl);
+    move("step-extra-left", extraLeftHostEl);
+    move("step-actions", actionHostEl);
+    move("step-form", formHostEl);
+
+    const readOnly = stepOrder.indexOf(key) < firstOpenIndex();
+    readonlyBannerEl.style.display = readOnly ? "block" : "none";
+    setStepReadOnly([formHostEl, actionHostEl], readOnly);
+
+    // Per your instruction: zoom/pan is per-step-visit, so every tab switch starts at 100%.
+    resetZoom();
+    clearMessage();
+    paneRightEl.scrollTop = 0;
+    // The fixed north arrow belongs to the North Setter, the one step whose whole job is
+    // lining the drawing up against it.
+    $("northIndicator").style.display = key === "north" ? "block" : "none";
+    const stepDef = def.steps.find((s) => s.key === key) || {};
+    zoomControlsEl.style.display = stepDef.noZoom ? "none" : "flex";
+    zoomViewportEl.classList.toggle("no-zoom", !!stepDef.noZoom);
+    refreshTabs();
+    onStepShown(key);
+  }
+
+  function markFinalized(key) {
+    finalized[key] = true;
+    refreshTabs();
+  }
+
+  // A finalize writes its own outcome message (info, or warning when the backend repaired
+  // something) and then navigates; goToStep clears the message area on arrival, so the
+  // outcome is carried across rather than being wiped the instant it is written.
+  function advanceFrom(key) {
+    const carried = messageAreaEl.textContent;
+    const carriedSeverity = messageAreaEl.dataset.severity;
+    markFinalized(key);
+    const i = stepOrder.indexOf(key);
+    if (i >= 0 && i + 1 < stepOrder.length) goToStep(stepOrder[i + 1]);
+    if (carried) setMessage(carried, carriedSeverity);
+  }
+
+  // Each step redraws itself on arrival, so a diagram is never stale from a previous visit.
+  // Road Logic / Plot Logic still only recompute on their own buttons - this just re-renders
+  // the last computed state, which is what those steps show by design.
+  function onStepShown(key) {
+    if (key === "mb") { if (currentVertices) drawPreview(currentVertices, lastBuildable); }
+    else if (key === "road") drawRoadLogicPreview();
+    else if (key === "plots") drawPlotLogicPreview();
+    else if (key === "editor") drawPlotEditorPreview();
+    else if (key === "north") renderFinalSitePlan();
+    else if (key === "print") {
+      renderFinalSitePlan();   // re-read the finalised angle before rendering the sheet
+      schedulePreview(0);
+    }
+  }
+
+  // ---- North Setter finalize ---------------------------------------------------------
+  $("finalizeNorthBtn").addEventListener("click", () => {
+    if (!currentVertices) {
+      $("finalizeNorthNote").textContent = "Finalize the plot boundary first.";
+      $("finalizeNorthNote").classList.add("closure-error");
+      setMessage("There's no drawing to orient yet - finish Metes & Bounds first.", "error");
+      return;
+    }
+    const rotation = ((parseFloat(rotationInputEl.value) || 0) % 360 + 360) % 360;
+    $("finalizeNorthNote").textContent = "";
+    $("finalizeNorthNote").classList.remove("closure-error");
+    renderFinalSitePlan();
+    setMessage(
+      rotation === 0
+        ? "North finalised with the drawing unrotated (its own north already points up)."
+        : `North finalised - the drawing is rotated ${rotation}° to line its true north up with the arrow.`,
+      "info",
+    );
+    advanceFrom("north");
   });
-  // The Road logic preview used to only ever get drawn by the "Build master plan" button's
-  // own click handler (which always redrew it fresh at that moment); now that this page is
-  // reached by navigation instead, redraw it on every visit so it reflects whatever the site
-  // plan currently is - a no-op via its own currentVertices guard if nothing's computed yet.
-  if (step === "masterplan") drawRoadLogicPreview();
+
+  // ---- Metes & Bounds finalize -------------------------------------------------------
+  $("finalizeSiteBtn").addEventListener("click", async () => {
+    const ok = await computeSite();
+    if (!ok) return;   // computeSite() already wrote the blocking error into the message area
+    advanceFrom("mb");
+  });
+
+  // ---- Plot Editor: click a plot on the drawing to select it -------------------------
+  // Plain even-odd ray cast. Carried over from uttam-5 (where it sat in the Building Footprint
+  // block, which uttam-6 drops) because plotStaysInsideSubsection()/pointStrictlyInsidePolygon()
+  // in the plot editor still depend on it - losing it silently broke every "Save plot".
+  function pointInPolygon(pt, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y;
+      const xj = poly[j].x, yj = poly[j].y;
+      const intersect = (yi > pt.y) !== (yj > pt.y) &&
+        pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi) + xi;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  plotEditorSvgEl.addEventListener("click", (ev) => {
+    if (suppressNextClick) {               // that was the tail of a pan gesture, not a selection
+      suppressNextClick = false;
+      return;
+    }
+    if (!lastEditorTransform || !lastEditorTransform.inverse) return;
+    const ctm = plotEditorSvgEl.getScreenCTM();
+    if (!ctm) return;
+    const p = plotEditorSvgEl.createSVGPoint();
+    p.x = ev.clientX; p.y = ev.clientY;
+    const local = p.matrixTransform(ctm.inverse());       // SVG user units
+    const world = lastEditorTransform.inverse(local);     // plot feet
+
+    for (let si = 0; si < subsections.length; si++) {
+      const sub = subsections[si];
+      const plots = sub.plots || [];
+      for (let pi = 0; pi < plots.length; pi++) {
+        const verts = plotDisplayVertices(si, pi);
+        if (!pointInPolygon(world, verts)) continue;
+        if (plots[pi].fill) {
+          // Fill plots are a derived view of the leftover land, not editable objects.
+          setMessage(`${plots[pi].name || "That region"} is a fill plot, not an editable plot. Promote it with "Add plot" first.`, "info");
+          return;
+        }
+        // An in-progress edit on a different plot is discarded without a prompt, matching the
+        // existing "nothing is permanent until Save plot" rule.
+        clearMessage();
+        plotNameInputEl.value = plots[pi].name;
+        loadPlotForEditing(plots[pi].name);
+        return;
+      }
+    }
+    // Nothing editable under the cursor. Anywhere inside the site boundary that isn't a real
+    // plot is open space (or a road strip / a hairline gap between plots), so say so once
+    // rather than going silent - testing against the site boundary rather than each
+    // sub-section's own polygon deliberately, since open space very often hugs a sub-section
+    // edge and an exact ray cast there is a coin flip. A click out in the margin stays quiet.
+    if (currentVertices && pointInPolygon(world, currentVertices)) {
+      setMessage("Not an editable plot - only road-facing (real) plots can be edited.", "info");
+    }
+  });
+
+  // ---- Print Sheet: stage 1 (editable preview) / stage 2 (full-screen final) ----------
+  let previewTimer = null;
+  let previewBusy = false;
+
+  function schedulePreview(delayMs) {
+    if (currentStep !== "print") return;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(refreshSheetPreview, delayMs === undefined ? 500 : delayMs);
+  }
+
+  async function refreshSheetPreview() {
+    if (previewBusy || !currentVertices) return;
+    previewBusy = true;
+    pdfNoteEl.textContent = "Refreshing preview...";
+    try {
+      renderFinalSitePlan();
+      const doc = await generatePdf();
+      if (!doc) return;
+      pdfPreviewFrameEl.src = String(doc.output("bloburl"));
+      pdfNoteEl.textContent = "Preview up to date.";
+    } catch (err) {
+      pdfNoteEl.textContent = `Preview failed: ${err}`;
+      setMessage(`Could not render the sheet preview: ${err}`, "error");
+    } finally {
+      previewBusy = false;
+    }
+  }
+
+  // Text edits are the only thing that can change the sheet here; geometry and computed areas
+  // are read-only in this step by design.
+  stepNodes.print.querySelectorAll("input, select, textarea").forEach((el) => {
+    const ev = el.type === "file" || el.tagName === "SELECT" || el.type === "radio" ? "change" : "input";
+    el.addEventListener(ev, () => schedulePreview());
+  });
+
+  $("previewPdfBtn").addEventListener("click", () => schedulePreview(0));
+
+  $("continueSheetBtn").addEventListener("click", async () => {
+    if (!currentVertices) {
+      setMessage("Finalize this tool's plot boundary before building a sheet.", "error");
+      return;
+    }
+    setMessage("Rendering the final sheet...", "info");
+    let doc;
+    try {
+      renderFinalSitePlan();
+      doc = await generatePdf();
+    } catch (err) {
+      setMessage(`Could not render the final sheet: ${err}`, "error");
+      return;
+    }
+    if (!doc) return;
+    finalSheetFrameEl.src = String(doc.output("bloburl"));
+    $("finalSheetTitle").textContent = `${def.title} - final sheet (locked)`;
+    finalSheetEl.style.display = "flex";
+    downloadPdfBtn.disabled = false;
+    clearMessage();
+  });
+
+  // Stage 2 is never a one-way door.
+  $("backToEditBtn").addEventListener("click", () => {
+    finalSheetEl.style.display = "none";
+  });
+
+  $("downloadFinalBtn").addEventListener("click", () => {
+    if (lastPdfDoc) lastPdfDoc.save(`${toolKey}_sheet.pdf`);
+  });
+
+  $("homeBtn").addEventListener("click", () => showHome());
+
+  // ---- Boot this instance ------------------------------------------------------------
+  buildTabs();
+  updateUnitLabels();
+  buildEdgeRows();
+  goToStep(stepOrder[0]);
+
+  return {
+    root,
+    // Exposed only so the CDP test harness can inspect each instance's own state directly
+    // and prove the two tools really are separate objects. Nothing in the app reads these
+    // across instances, and there is no path from one instance's debug handle to another's.
+    debug: {
+      toolKey,
+      get currentVertices() { return currentVertices; },
+      get lastBuildable() { return lastBuildable; },
+      get roads() { return roads; },
+      get subsections() { return subsections; },
+      get plotEditSession() { return plotEditSession; },
+      get finalized() { return finalized; },
+      get currentStep() { return currentStep; },
+      get zoom() { return { zoom, panX, panY }; },
+      readLengths: () => readLengths(),
+      sheetFields: () => ({
+        adminName: adminNameInputEl.value,
+        wardNo: wardNoInputEl.value,
+        surveyor: surveyorNameInputEl.value,
+        rotation: rotationInputEl.value,
+      }),
+    },
+  };
 }
-document.querySelectorAll(".step-nav .step-pill:not(.todo)").forEach((pill) => {
-  pill.addEventListener("click", () => showWizardPage(pill.dataset.step));
+
+// ---------------------------------------------------------------------------------------
+// Home screen router. Holds WHICH tool is mounted - never any tool's data.
+// ---------------------------------------------------------------------------------------
+const homeScreenEl = document.getElementById("homeScreen");
+const toolHostEl = document.getElementById("toolHost");
+const homeNoteEl = document.getElementById("homeNote");
+let activeTool = null;
+
+function showHome() {
+  activeTool = null;
+  toolHostEl.innerHTML = "";     // destroys the instance; its state goes with it
+  toolHostEl.style.display = "none";
+  homeScreenEl.style.display = "block";
+  homeNoteEl.textContent = "";
+}
+
+function openTool(key) {
+  homeScreenEl.style.display = "none";
+  toolHostEl.style.display = "block";
+  // A fresh instance every time - documents aren't persisted or listed yet, so opening a tool
+  // always starts empty rather than resuming whatever was open before.
+  activeTool = createTool(key, toolHostEl);
+}
+
+document.querySelectorAll(".home-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    const key = card.dataset.tool;
+    if (card.classList.contains("disabled")) {
+      homeNoteEl.textContent = `${card.querySelector(".home-card-title").textContent} is coming soon - it isn't built yet.`;
+      return;
+    }
+    openTool(key);
+  });
 });
 
-// ---- Footprint page: choose the site-plan source ----
-importSiteplanBtn.addEventListener("click", () => {
-  footprintCardEl.style.display = "block";
-  uploadSiteplanCardEl.style.display = "none";
-});
-uploadSiteplanBtn.addEventListener("click", () => {
-  uploadSiteplanCardEl.style.display = "block";
-  footprintCardEl.style.display = "none";
-});
+showHome();
 
-showWizardPage(2);
-updateUnitLabels();
-buildEdgeRows();
+// Test-harness handle only (see createTool's `debug` above for why this exists).
+window.__uttam = {
+  openTool,
+  showHome,
+  get active() { return activeTool; },
+};

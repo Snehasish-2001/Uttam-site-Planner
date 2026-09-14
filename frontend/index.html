@@ -3,598 +3,549 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Uttam Site Planner - Guided Wizard</title>
+<title>Uttam Site Planner - Independent Tools</title>
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-<header>
-  <h1>Uttam Site Planner <span class="badge">Beta</span></h1>
-  <p>A guided, page-by-page wizard for a plot of any shape - rectangular, trapezoidal, or a concave/L-shaped site. This beta currently covers the Site Plan and Footprint steps; the rest of the wizard is coming soon.</p>
-  <div class="step-nav">
-    <span class="step-pill todo" data-step="1">1. Project &amp; legal - coming soon</span>
-    <span class="step-pill active" data-step="2">2. Site plan</span>
-    <span class="step-pill" data-step="masterplan">Master plan</span>
-    <span class="step-pill" data-step="3">3. Footprint</span>
-    <span class="step-pill todo" data-step="4">4. Floors &amp; rooms - coming soon</span>
+
+<!-- ============================================================================
+     Home screen. Every card click starts a FRESH instance of that tool - nothing
+     is persisted or listed yet, and no tool can see another tool's data.
+     ============================================================================ -->
+<div id="homeScreen">
+  <header class="home-header">
+    <h1>Uttam Site Planner <span class="badge">Beta</span></h1>
+    <p>
+      Pick a tool. Site Plan and Master Plan are two separate, standalone products - each one
+      starts from its own plot boundary and keeps its own data, so nothing you enter in one
+      ever shows up in the other.
+    </p>
+  </header>
+
+  <div class="home-cards">
+    <button type="button" class="home-card" data-tool="site">
+      <span class="home-card-title">Site Plan</span>
+      <span class="home-card-desc">
+        Enter a plot of any shape as metes and bounds, compute its buildable area, and print a
+        surveyor-style sheet.
+      </span>
+      <span class="home-card-steps">Metes &amp; Bounds &rarr; Print Sheet</span>
+    </button>
+
+    <button type="button" class="home-card" data-tool="master">
+      <span class="home-card-title">Master Plan</span>
+      <span class="home-card-desc">
+        Subdivide a plot: carve internal roads, fill the resulting blocks with plots, hand-edit
+        any individual plot, and print the finished master plan.
+      </span>
+      <span class="home-card-steps">Metes &amp; Bounds &rarr; Road Logic &rarr; Plot Logic &rarr; Plot Editor &rarr; Print Sheet</span>
+    </button>
+
+    <button type="button" class="home-card disabled" data-tool="floor" aria-disabled="true">
+      <span class="home-card-title">Floor Plan</span>
+      <span class="home-card-desc">
+        Building footprint, floors and rooms, elevation and section. Not built yet.
+      </span>
+      <span class="home-card-steps">Coming soon</span>
+    </button>
+
+    <button type="button" class="home-card disabled" data-tool="more" aria-disabled="true">
+      <span class="home-card-title">More</span>
+      <span class="home-card-desc">
+        Foundation and soak pit, CAD export, cost estimate. Not built yet.
+      </span>
+      <span class="home-card-steps">Coming soon</span>
+    </button>
   </div>
-</header>
 
-<main>
-<div class="shared-with-masterplan" id="wizardPage2">
-  <section class="card">
-    <h2>Site plot - metes and bounds</h2>
-    <p class="hint">
-      Describe the plot boundary the way an architect lays it out on site: walk the perimeter
-      giving each edge's length, then triangulate it with diagonals measured from corner A -
-      exactly how a real site is squared up with a tape measure, no angle-measuring tool
-      needed. With N sides fixed, a polygon needs exactly <strong>N-3</strong> diagonals from
-      A to fully determine its shape (a triangle needs none at all - 3 sides alone fully fix
-      it; a quadrilateral needs exactly 1; a pentagon needs 2).
-    </p>
+  <p id="homeNote" class="home-note"></p>
+</div>
 
-    <div class="row">
-      <div class="field">
-        <label for="unitSelect">Unit</label>
-        <select id="unitSelect">
-          <option value="ft" selected>Feet</option>
-          <option value="m">Meter</option>
-        </select>
+<!-- A mounted tool instance lives here. Only ever one at a time; going Home destroys it. -->
+<div id="toolHost"></div>
+
+<!-- ============================================================================
+     Shared shell. Both tools clone this same template - the split-screen layout,
+     the zoom/pan wrapper, the message area and the step tabs are one piece of UI
+     code used twice, each time with its own separate data.
+     ============================================================================ -->
+<template id="toolShellTemplate">
+  <div class="tool-shell">
+    <header class="tool-header">
+      <div class="tool-header-top">
+        <button type="button" class="home-link" data-el="homeBtn">&larr; Home</button>
+        <h1 data-el="toolTitle"></h1>
+        <span class="badge" data-el="toolBadge"></span>
       </div>
+      <nav class="step-tabs" data-el="stepTabs"></nav>
+    </header>
+
+    <div class="split">
+      <section class="pane-left">
+        <div class="zoom-viewport" data-el="zoomViewport">
+          <div class="zoom-canvas" data-el="zoomCanvas"></div>
+          <div class="zoom-controls" data-el="zoomControls">
+            <button type="button" data-el="zoomOutBtn" title="Zoom out">&minus;</button>
+            <span class="zoom-level" data-el="zoomLevel">100%</span>
+            <button type="button" data-el="zoomInBtn" title="Zoom in">+</button>
+            <button type="button" data-el="zoomFitBtn" title="Reset to 100%">Fit</button>
+          </div>
+          <div class="north-indicator" data-el="northIndicator" style="display:none;">
+            <svg viewBox="0 0 80 80" width="80" height="80">
+              <line x1="40" y1="74" x2="40" y2="46" stroke="#1f2430" stroke-width="4" />
+              <polygon points="26,46 54,46 40,24" fill="#1f2430" />
+              <text x="40" y="18" font-size="20" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#1f2430">N</text>
+            </svg>
+          </div>
+        </div>
+
+        <div class="legend" data-el="legendHost"></div>
+        <div class="message-area" data-el="messageArea"></div>
+        <div class="extra-left" data-el="extraLeftHost"></div>
+        <div class="action-bar" data-el="actionHost"></div>
+      </section>
+
+      <section class="pane-right" data-el="paneRight">
+        <div class="readonly-banner" data-el="readonlyBanner" style="display:none;">
+          Finalized &mdash; showing saved values
+        </div>
+        <div data-el="formHost"></div>
+      </section>
     </div>
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="sidesCount">Number of sides</label>
-        <input type="number" id="sidesCount" min="3" max="20" value="4" />
+
+    <!-- Print Sheet stage 2: takes over the whole viewport. -->
+    <div class="final-sheet" data-el="finalSheet" style="display:none;">
+      <div class="final-sheet-bar">
+        <button type="button" class="secondary" data-el="backToEditBtn">&larr; Back to editing</button>
+        <span class="final-sheet-title" data-el="finalSheetTitle">Final sheet</span>
+        <button type="button" data-el="downloadFinalBtn">Download PDF</button>
       </div>
-      <div class="checkbox-row" style="margin-top: 18px;">
-        <input type="checkbox" id="regularToggle" autocomplete="off" />
-        <label for="regularToggle">This is a regular polygon (all sides/angles equal)</label>
-      </div>
+      <iframe class="final-sheet-frame" data-el="finalSheetFrame" title="Final print sheet"></iframe>
     </div>
-    <p class="hint" id="regularNote" style="display:none;">
-      With a regular polygon, every side and diagonal is fixed by the number of sides alone -
-      changing one side length changes the polygon's overall size, not its shape, so the
-      other values are expected to stay in the same proportion while you edit lengths here.
-    </p>
+  </div>
+</template>
 
-    <table class="edge-table">
-      <thead>
-        <tr>
-          <th style="width: 90px;">Edge</th>
-          <th id="lengthHeader">Length (ft)</th>
-          <th style="width: 140px;">Role</th>
-          <th id="setbackHeader" style="width: 110px;">Setback (ft)</th>
-          <th id="roadWidthHeader" style="width: 120px;">Road width (ft)</th>
-          <th style="width: 150px;">Neighbour name</th>
-          <th style="width: 110px;">Plot no.</th>
-        </tr>
-      </thead>
-      <tbody id="edgeRows"></tbody>
-    </table>
+<!-- ============================================================================
+     Step definitions. Each `.step-def` carries four slots that the shell moves
+     (not clones) into the split layout when that step is shown: the diagram, its
+     legend, its action buttons, and its right-pane form. Both tools clone this
+     whole template and delete the steps they don't have, so the Metes & Bounds
+     and Print Sheet markup below is genuinely the same component in both - just
+     two separate instances of it.
+     ============================================================================ -->
+<template id="toolStepsTemplate">
 
-    <div id="diagonalsSection" style="margin-top: 16px;">
-      <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals</h3>
-      <p class="hint" id="diagonalsNote"></p>
-      <table class="edge-table" id="diagonalsTable" style="display:none;">
-        <thead>
-          <tr>
-            <th style="width: 90px;">From</th>
-            <th style="width: 90px;">To</th>
-            <th id="diagonalLengthHeader">Length (ft)</th>
-          </tr>
-        </thead>
-        <tbody id="diagonalRows"></tbody>
-      </table>
-      <button id="addDiagonalBtn" type="button" class="secondary" style="display:none; margin-top: 8px;">+ Add diagonal</button>
+  <!-- ---------------- Metes & Bounds (Site Plan AND Master Plan) ---------------- -->
+  <div class="step-def" data-step="mb">
+    <div class="step-diagram">
+      <svg data-el="sitePreviewSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="roadExtension" id="roadExtensionLabel">Road extension (ft, each side)</label>
-        <input type="number" id="roadExtension" min="0" step="1" value="15" />
-      </div>
-    </div>
-
-    <div class="site-preview">
-      <svg id="sitePreviewSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
-    </div>
-    <div class="legend">
+    <div class="step-legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area (server-computed)</span>
       <span><span class="swatch" style="border-color:#c0392b; border-top-style:dotted;"></span>Diagonal</span>
-      <span><span class="swatch" style="border-color:#8d949e; border-top-width:8px;"></span>Road (width as entered, extended with a break line)</span>
-      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Master plan road (from Road logic)</span>
+      <span><span class="swatch" style="border-color:#8d949e; border-top-width:8px;"></span>Road (width as entered)</span>
     </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="computeBtn">Compute buildable area</button>
-      <span id="closureNote" class="hint" style="margin: 0;"></span>
+    <div class="step-actions">
+      <button type="button" data-el="computeBtn">Compute area</button>
+      <button type="button" data-el="finalizeSiteBtn">Finalize site plot and next</button>
+      <span class="hint" data-el="closureNote"></span>
     </div>
+    <div class="step-form">
+      <h2>Site plot - metes and bounds</h2>
+      <p class="hint">
+        Walk the perimeter giving each edge's length, then triangulate it with diagonals
+        measured from corner A - exactly how a real site is squared up with a tape measure, no
+        angle-measuring tool needed. With N sides fixed, a polygon needs exactly
+        <strong>N-3</strong> diagonals from A to fully determine its shape.
+      </p>
 
-    <div id="areaSummary" class="result-box" style="display:none;"></div>
+      <div class="row">
+        <div class="field">
+          <label>Unit</label>
+          <select data-el="unitSelect">
+            <option value="ft" selected>Feet</option>
+            <option value="m">Meter</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Number of sides</label>
+          <input type="number" data-el="sidesCount" min="3" max="20" value="4" />
+        </div>
+      </div>
+      <div class="checkbox-row" style="margin-top: 12px;">
+        <label><input type="checkbox" data-el="regularToggle" autocomplete="off" /> This is a regular polygon (all sides/angles equal)</label>
+      </div>
+      <p class="hint" data-el="regularNote" style="display:none;">
+        With a regular polygon, every side and diagonal is fixed by the number of sides alone -
+        changing one side length changes the polygon's overall size, not its shape.
+      </p>
 
-    <div id="statusLog" class="status-log empty"></div>
-    <div id="errorBox" class="error-box" style="display:none;"></div>
-    <div id="resultBox" class="result-box" style="display:none;"></div>
-  </section>
+      <table class="edge-table">
+        <thead>
+          <tr>
+            <th style="width: 74px;">Edge</th>
+            <th data-el="lengthHeader">Length (ft)</th>
+            <th style="width: 130px;">Role</th>
+            <th data-el="setbackHeader" style="width: 100px;">Setback (ft)</th>
+            <th data-el="roadWidthHeader" style="width: 110px;">Road width (ft)</th>
+            <th style="width: 130px;">Neighbour name</th>
+            <th style="width: 100px;">Plot no.</th>
+          </tr>
+        </thead>
+        <tbody data-el="edgeRows"></tbody>
+      </table>
 
-</div>
-<div class="wizard-page" id="wizardPagemasterplan" style="display:none;">
-  <section class="card" id="roadLogicCard">
-    <h2>Road logic</h2>
-    <p class="hint">
-      Lay out the internal road network you'll carve this plot into smaller lots along - each
-      road connects to an existing plot side, an already-placed road, or ends as a dead end.
-      This defines the roads only; slicing the resulting blocks into individual lots comes
-      after this.
-    </p>
+      <div style="margin-top: 16px;">
+        <h3>Diagonals</h3>
+        <p class="hint" data-el="diagonalsNote"></p>
+        <table class="edge-table" data-el="diagonalsTable" style="display:none;">
+          <thead>
+            <tr>
+              <th style="width: 80px;">From</th>
+              <th style="width: 80px;">To</th>
+              <th data-el="diagonalLengthHeader">Length (ft)</th>
+            </tr>
+          </thead>
+          <tbody data-el="diagonalRows"></tbody>
+        </table>
+        <button type="button" class="secondary" data-el="addDiagonalBtn" style="display:none; margin-top: 8px;">+ Add diagonal</button>
+      </div>
 
-    <div class="site-preview">
-      <svg id="roadLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="row" style="margin-top: 14px;">
+        <div class="field">
+          <label data-el="roadExtensionLabel">Road extension (ft, each side)</label>
+          <input type="number" data-el="roadExtension" min="0" step="1" value="15" />
+        </div>
+      </div>
+
+      <div class="result-box" data-el="areaSummary" style="display:none;"></div>
+      <div class="status-log empty" data-el="statusLog"></div>
+      <div class="error-box" data-el="errorBox" style="display:none;"></div>
+      <div class="result-box" data-el="resultBox" style="display:none;"></div>
     </div>
-    <div class="legend">
+  </div>
+
+  <!-- ---------------- Road Logic (Master Plan only) ---------------- -->
+  <div class="step-def" data-step="road">
+    <div class="step-diagram">
+      <svg data-el="roadLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="step-legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
     </div>
-
-    <p class="hint" id="roadLogicNote">No roads yet - click "Add road" to start.</p>
-
-    <div id="roadRows"></div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="addRoadBtn" type="button" class="secondary">+ Add road</button>
+    <div class="step-actions">
+      <button type="button" class="secondary" data-el="addRoadBtn">+ Add road</button>
+      <button type="button" data-el="finalizeRoadLogicBtn">Finalize road logic</button>
+      <span class="hint" data-el="finalizeRoadLogicNote"></span>
     </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="finalizeRoadLogicBtn" type="button">Finalize road logic</button>
-      <span id="finalizeRoadLogicNote" class="hint" style="margin: 0;"></span>
+    <div class="step-form">
+      <h2>Road logic</h2>
+      <p class="hint">
+        Lay out the internal road network you'll carve this plot into smaller lots along - each
+        road connects to an existing plot side, an already-placed road, or ends as a dead end.
+        The diagram updates when you finalize or add/change a road, not on every keystroke.
+      </p>
+      <p class="hint" data-el="roadLogicNote">No roads yet - click "Add road" to start.</p>
+      <div data-el="roadRows"></div>
     </div>
-  </section>
+  </div>
 
-  <section class="card" id="plotLogicCard" style="display:none;">
-    <h2>Plot logic</h2>
-    <p class="hint">
-      The finalized roads divide the plot into sub-sections - set target plot size, count, and
-      spacing per sub-section, then insert plots into each one.
-    </p>
-
-    <div class="site-preview">
-      <svg id="plotLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+  <!-- ---------------- Plot Logic (Master Plan only) ---------------- -->
+  <div class="step-def" data-step="plots">
+    <div class="step-diagram">
+      <svg data-el="plotLogicSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
-    <div class="legend">
+    <div class="step-legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
       <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
       <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
       <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
     </div>
-    <p class="hint" id="plotLogicNote"></p>
-
-    <div id="subsectionRows"></div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="finalizePlotLogicBtn" type="button">Finalize plot logic</button>
-      <span id="finalizePlotLogicNote" class="hint" style="margin: 0;"></span>
+    <div class="step-actions">
+      <button type="button" data-el="finalizePlotLogicBtn">Finalize plot logic</button>
+      <span class="hint" data-el="finalizePlotLogicNote"></span>
     </div>
-  </section>
-
-  <section class="card" id="plotEditorCard" style="display:none;">
-    <h2>Plot editor</h2>
-    <p class="hint">
-      The current master plan is shown below. Type a plot's name (e.g. <code>S1P1</code>) to load
-      it for editing - its own corners are labeled A', B', C'... in the display while it's loaded.
-      Use <strong>&minus;</strong> / <strong>+</strong> to shrink or grow it by pushing one of its
-      own edges (pick which with "Push edge", or leave it on Auto to use the rear edge first), or
-      edit a side/diagonal directly. A plot only ever grows into <em>free land</em> and only ever
-      gives land back to it - <strong>no other plot is ever moved</strong>. The dotted fill plots
-      and hatched open space are a view of whatever land is left over, and are rebuilt around your
-      edit. Nothing is permanent until you click "Save plot". A fill plot (no road frontage) can be
-      promoted into a real plot with "Add plot" below - type its name (e.g. <code>S1F1</code>,
-      several at once separated by spaces) and it becomes a real plot with the next plot number in
-      its sub-section (e.g. <code>S1P4</code>).
-    </p>
-
-    <div class="site-preview">
-      <svg id="plotEditorSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="step-form">
+      <h2>Plot logic</h2>
+      <p class="hint">
+        The finalized roads divide the plot into sub-sections - set target plot size and spacing
+        per sub-section, then insert plots into each one. The diagram updates when you click a
+        sub-section's "Insert plots", not as you type.
+      </p>
+      <p class="hint" data-el="plotLogicNote"></p>
+      <div data-el="subsectionRows"></div>
+      <div data-el="plotLogicCard" style="display:none;"></div>
     </div>
-    <div class="legend">
+  </div>
+
+  <!-- ---------------- Plot Editor (Master Plan only) ---------------- -->
+  <div class="step-def" data-step="editor">
+    <div class="step-diagram">
+      <svg data-el="plotEditorSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet" class="clickable-plots"></svg>
+    </div>
+    <div class="step-legend">
       <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
-      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
-      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
+      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section / real plot</span>
+      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (not editable)</span>
       <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
       <span><span class="swatch" style="border-color:#1f6fb4; border-top-width:3px;"></span>Plot being edited</span>
     </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="addPlotInput">Add plot (promote fill plot(s) to real, e.g. S1F1 S1F2)</label>
-        <input type="text" id="addPlotInput" placeholder="e.g. S1F1 S1F2" />
-      </div>
-      <button id="addPlotBtn" type="button" class="secondary">Add plot</button>
-      <span id="addPlotNote" class="hint" style="margin: 0; align-self: center;"></span>
+    <div class="step-actions">
+      <button type="button" data-el="finalizeMasterPlanBtn">Finalize master plan</button>
+      <span class="hint" data-el="finalizeMasterPlanNote"></span>
     </div>
+    <div class="step-form">
+      <h2>Plot editor</h2>
+      <p class="hint">
+        <strong>Click a real plot on the drawing</strong> to load it for editing (or type its name
+        below - both work). Use <strong>&minus;</strong> / <strong>+</strong> to shrink or grow it
+        by pushing one of its own edges, or edit a side/diagonal directly. A plot only ever grows
+        into <em>free land</em> and only ever gives land back to it - <strong>no other plot is ever
+        moved</strong>. Nothing is permanent until you click "Save plot"; switching to a different
+        plot discards an in-progress edit.
+      </p>
 
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="plotNameInput">Plot name</label>
-        <input type="text" id="plotNameInput" placeholder="e.g. S1P1" />
-      </div>
-      <span id="plotNameNote" class="hint" style="margin: 0; align-self: center;"></span>
-      <button id="resetPlotBtn" type="button" class="secondary" style="margin-left: auto;">Reset plot</button>
-      <button id="savePlotBtn" type="button">Save plot</button>
-    </div>
-    <p class="hint" id="savePlotNote" style="margin: 4px 0 0;"></p>
-
-    <div id="plotEditFields" style="display:none; margin-top: 14px;">
       <div class="row">
         <div class="field">
-          <label for="plotSidesCount">Number of sides (fixed)</label>
-          <input type="number" id="plotSidesCount" disabled />
+          <label>Add plot (promote fill plot(s) to real, e.g. S1F1 S1F2)</label>
+          <input type="text" data-el="addPlotInput" placeholder="e.g. S1F1 S1F2" />
+        </div>
+        <button type="button" class="secondary" data-el="addPlotBtn">Add plot</button>
+      </div>
+      <p class="hint" data-el="addPlotNote"></p>
+
+      <div class="row" style="margin-top: 12px;">
+        <div class="field">
+          <label>Plot name</label>
+          <input type="text" data-el="plotNameInput" placeholder="e.g. S1P1" />
+        </div>
+        <button type="button" class="secondary" data-el="resetPlotBtn">Reset plot</button>
+        <button type="button" data-el="savePlotBtn">Save plot</button>
+      </div>
+      <p class="hint" data-el="plotNameNote"></p>
+      <p class="hint" data-el="savePlotNote"></p>
+
+      <div data-el="plotEditFields" style="display:none; margin-top: 14px;">
+        <div class="row">
+          <div class="field">
+            <label>Number of sides (fixed)</label>
+            <input type="number" data-el="plotSidesCount" disabled />
+          </div>
+          <div class="field">
+            <label>Plot area</label>
+            <div class="row" style="gap: 8px; align-items: center; margin-top: 2px;">
+              <button type="button" class="secondary stepper-btn" data-el="plotAreaMinusBtn">&minus;</button>
+              <span data-el="plotAreaValue" style="min-width: 100px; text-align: center; font-weight: 600;"></span>
+              <button type="button" class="secondary stepper-btn" data-el="plotAreaPlusBtn">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Push edge</label>
+            <select data-el="pushEdgeSelect"></select>
+          </div>
+        </div>
+        <p class="hint" data-el="plotAreaStepNote"></p>
+
+        <table class="edge-table" style="margin-top: 10px;">
+          <thead>
+            <tr><th style="width: 80px;">Edge</th><th>Length (ft)</th></tr>
+          </thead>
+          <tbody data-el="plotEdgeRows"></tbody>
+        </table>
+
+        <div style="margin-top: 16px;">
+          <h3>Diagonals</h3>
+          <p class="hint" data-el="plotDiagonalsNote"></p>
+          <table class="edge-table" data-el="plotDiagonalsTable" style="display:none;">
+            <thead>
+              <tr><th style="width: 80px;">From</th><th style="width: 80px;">To</th><th>Length (ft)</th></tr>
+            </thead>
+            <tbody data-el="plotDiagonalRows"></tbody>
+          </table>
+          <button type="button" class="secondary" data-el="addPlotDiagonalBtn" style="display:none; margin-top: 8px;">+ Add diagonal</button>
+        </div>
+
+        <p class="hint" data-el="plotAreaNote" style="margin-top: 12px; font-weight: 600;"></p>
+      </div>
+
+      <div data-el="plotEditorCard" style="display:none;"></div>
+
+      <div class="locked-plan" data-el="masterPlanCard" style="display:none;">
+        <h3>Final master plan (locked)</h3>
+        <div class="mini-preview">
+          <svg data-el="masterPlanSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div class="result-box" data-el="masterPlanSummary" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- North Setter (Site Plan AND Master Plan) ----------------
+       Orienting the drawing to true north is its own step, ahead of composing the sheet: the
+       rotation is a property of the drawing, not of the sheet's text block, and it is the last
+       thing that changes the geometry the sheet embeds. -->
+  <div class="step-def" data-step="north">
+    <div class="step-diagram">
+      <svg data-el="finalSitePlanSvg" viewBox="-250 -250 1100 920" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="step-legend">
+      <span>Ink-only presentation drawing. North stays fixed - rotate the drawing until its true north lines up with the arrow.</span>
+    </div>
+    <div class="step-actions">
+      <button type="button" class="secondary" data-el="finaliseBtn">Redraw drawing</button>
+      <button type="button" data-el="finalizeNorthBtn">Finalise north</button>
+      <span class="hint" data-el="finalizeNorthNote"></span>
+    </div>
+    <div class="step-form">
+      <h2>North setter</h2>
+      <p class="hint">
+        The north arrow on the drawing is <strong>fixed</strong> and never moves - exactly like
+        the printed arrow on a real site plan sheet. Rotate the drawing itself until its true
+        north lines up with that arrow. The drawing updates as you type. "Finalise north" locks
+        the orientation in and moves on to the print sheet, which embeds the drawing at this
+        angle.
+      </p>
+
+      <div class="row">
+        <div class="field">
+          <label>Rotate drawing (degrees)</label>
+          <input type="number" data-el="rotationInput" min="0" max="359" step="1" value="0" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- Print Sheet (Site Plan AND Master Plan) ---------------- -->
+  <div class="step-def" data-step="print">
+    <div class="step-diagram">
+      <iframe data-el="pdfPreviewFrame" title="Print sheet preview" class="sheet-preview-frame"></iframe>
+    </div>
+    <div class="step-legend">
+      <span>Live preview of this tool's own sheet, at the north angle finalised in the previous step.</span>
+    </div>
+    <div class="step-actions">
+      <button type="button" class="secondary" data-el="previewPdfBtn">Refresh sheet preview</button>
+      <button type="button" data-el="continueSheetBtn">Continue to final sheet</button>
+      <span class="hint" data-el="pdfNote"></span>
+    </div>
+    <div class="step-form">
+      <h2>Print sheet</h2>
+      <p class="hint">
+        Stage 1 of 2. Only the text below is editable - the drawing, its orientation, its
+        geometry and every computed area come from this tool's own finalized data and are
+        read-only here. The preview on the left refreshes as you type. "Continue to final sheet"
+        locks these values into a full-screen final preview you can download from.
+      </p>
+
+      <div class="row">
+        <div class="field">
+          <label>Under</label>
+          <select data-el="adminTypeSelect">
+            <option value="Municipality" selected>Municipality</option>
+            <option value="Municipal Corporation">Municipal Corporation</option>
+            <option value="Panchayet">Panchayet</option>
+          </select>
         </div>
         <div class="field">
-          <label>Plot area</label>
-          <div class="row" style="gap: 8px; align-items: center; margin-top: 2px;">
-            <button id="plotAreaMinusBtn" type="button" class="secondary" style="width: 34px; padding: 0;">&minus;</button>
-            <span id="plotAreaValue" style="min-width: 110px; text-align: center; font-weight: 600;"></span>
-            <button id="plotAreaPlusBtn" type="button" class="secondary" style="width: 34px; padding: 0;">+</button>
+          <label data-el="adminNameLabel">Municipality name</label>
+          <input type="text" data-el="adminNameInput" placeholder="e.g. Purulia" />
+        </div>
+        <div class="field">
+          <label>Ward No.</label>
+          <input type="text" data-el="wardNoInput" placeholder="e.g. 1" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 14px;">
+        <div class="field">
+          <label>R.S Khatian No.</label>
+          <input type="text" data-el="rsKhatianInput" placeholder="e.g. 191" />
+        </div>
+        <div class="field">
+          <label>R.S Plot No.</label>
+          <input type="text" data-el="rsPlotInput" placeholder="e.g. 4718/P" />
+        </div>
+        <div class="field">
+          <label>C.S Plot No.</label>
+          <input type="text" data-el="csPlotInput" placeholder="e.g. 968/P" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 14px;">
+        <div class="field">
+          <label>Sketch map</label>
+          <div class="checkbox-row">
+            <label><input type="radio" name="sketchScaleMode" value="nts" data-el="sketchScaleNTS" /> Not to scale</label>
+            <label><input type="radio" name="sketchScaleMode" value="scale" data-el="sketchScaleToScale" checked /> To scale</label>
+          </div>
+          <div class="ratio-row" data-el="sketchScaleRatioRow" style="display: flex;">
+            <input type="number" data-el="sketchScaleX" placeholder="x" min="0" step="any" value="16" />
+            <span>:</span>
+            <input type="number" data-el="sketchScaleY" placeholder="y" min="0" step="any" value="1" />
           </div>
         </div>
         <div class="field">
-          <label for="pushEdgeSelect">Push edge</label>
-          <select id="pushEdgeSelect"></select>
+          <label>Site plan</label>
+          <div class="checkbox-row">
+            <label><input type="radio" name="siteScaleMode" value="nts" data-el="siteScaleNTS" /> Not to scale</label>
+            <label><input type="radio" name="siteScaleMode" value="scale" data-el="siteScaleToScale" checked /> To scale</label>
+          </div>
+          <div class="ratio-row" data-el="siteScaleRatioRow" style="display: flex;">
+            <input type="number" data-el="siteScaleX" placeholder="x" min="0" step="any" value="16" />
+            <span>:</span>
+            <input type="number" data-el="siteScaleY" placeholder="y" min="0" step="any" value="1" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Mouza map</label>
+          <div class="checkbox-row">
+            <label><input type="radio" name="mouzaScaleMode" value="nts" data-el="mouzaScaleNTS" /> Not to scale</label>
+            <label><input type="radio" name="mouzaScaleMode" value="scale" data-el="mouzaScaleToScale" checked /> To scale</label>
+          </div>
+          <div class="ratio-row" data-el="mouzaScaleRatioRow" style="display: flex;">
+            <input type="number" data-el="mouzaScaleX" placeholder="x" min="0" step="any" value="16" />
+            <span>:</span>
+            <input type="number" data-el="mouzaScaleY" placeholder="y" min="0" step="any" value="1" />
+          </div>
         </div>
       </div>
-      <p class="hint" id="plotAreaStepNote" style="margin-top: 4px;"></p>
 
-      <table class="edge-table" style="margin-top: 10px;">
-        <thead>
-          <tr>
-            <th style="width: 90px;">Edge</th>
-            <th>Length (ft)</th>
-          </tr>
-        </thead>
-        <tbody id="plotEdgeRows"></tbody>
-      </table>
-
-      <div style="margin-top: 16px;">
-        <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals</h3>
-        <p class="hint" id="plotDiagonalsNote"></p>
-        <table class="edge-table" id="plotDiagonalsTable" style="display:none;">
-          <thead>
-            <tr>
-              <th style="width: 90px;">From</th>
-              <th style="width: 90px;">To</th>
-              <th>Length (ft)</th>
-            </tr>
-          </thead>
-          <tbody id="plotDiagonalRows"></tbody>
-        </table>
-        <button id="addPlotDiagonalBtn" type="button" class="secondary" style="display:none; margin-top: 8px;">+ Add diagonal</button>
-      </div>
-
-      <p class="hint" id="plotAreaNote" style="margin-top: 12px; font-weight: 600;"></p>
-    </div>
-
-    <div class="row" style="margin-top: 18px;">
-      <button id="finalizeMasterPlanBtn" type="button">Finalize master plan</button>
-      <span id="finalizeMasterPlanNote" class="hint" style="margin: 0;"></span>
-    </div>
-  </section>
-
-  <section class="card" id="masterPlanCard" style="display:none;">
-    <h2>Final master plan</h2>
-    <p class="hint">
-      A clean, locked presentation view of the whole master plan - every sub-section's plots
-      (frontage plots, fill plots and open space) together in one drawing, with the totals below.
-    </p>
-    <div class="site-preview">
-      <svg id="masterPlanSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
-    </div>
-    <div class="legend">
-      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
-      <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
-      <span><span class="swatch" style="border-color:#2f6f4f;"></span>Sub-section</span>
-      <span><span class="swatch" style="border-color:#c87828; border-top-style:dotted;"></span>Fill plot (no road frontage)</span>
-      <span><span class="swatch" style="border-color:#9aa1ac; border-top-style:dashed;"></span>Open space (not a plot)</span>
-    </div>
-    <div id="masterPlanSummary" class="result-box" style="display:none;"></div>
-  </section>
-
-</div>
-<div class="wizard-page" id="wizardPage3" style="display:none;">
-  <section class="card" id="footprintEntryCard">
-    <h2>Site plan source</h2>
-    <p class="hint">
-      Bring in the plot this footprint should sit inside of, either from the site plan you
-      already built or from an uploaded drawing.
-    </p>
-    <div class="row">
-      <button id="importSiteplanBtn" type="button">Import site-plan from Site Planner</button>
-      <button id="uploadSiteplanBtn" type="button" class="secondary">Upload site-plan</button>
-    </div>
-  </section>
-
-  <section class="card" id="uploadSiteplanCard" style="display:none;">
-    <h2>Upload site-plan</h2>
-    <p class="hint">
-      Image-based site-plan extraction isn't built yet - this is a placeholder for a future
-      update. Choose "Import site-plan from Site Planner" above to continue building a
-      footprint today.
-    </p>
-    <div class="row">
-      <input type="file" id="uploadSiteplanInput" accept="image/*" disabled />
-    </div>
-  </section>
-
-  <section class="card" id="footprintCard" style="display:none;">
-    <h2>Building footprint</h2>
-    <p class="hint">
-      Draw the outer wall line of the building itself, sitting inside the buildable area
-      computed on the Site plan page. Pick how many sides you need and a ready-made shape (rectangle,
-      L, T, or plus) is generated to fit - click <strong>Change shape</strong> to spin the
-      notch(es) to a different corner instead of hand-picking 90&deg;/270&deg; corners
-      yourself, which almost never lands on a shape that actually closes. Adjust individual
-      side lengths afterwards to resize it.
-    </p>
-
-    <div class="site-preview">
-      <svg id="footprintSvg" viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"></svg>
-    </div>
-    <div class="legend">
-      <span><span class="swatch" style="border-color:#1f2430;"></span>Plot boundary</span>
-      <span><span class="swatch" style="border-color:#999999; border-top-style:dashed;"></span>Buildable area</span>
-      <span><span class="swatch" style="border-color:#1a5fb4;"></span>Building footprint</span>
-      <span><span class="swatch" style="border-color:#c0392b; border-top-style:dashed;"></span>Gap (boundary doesn't close)</span>
-    </div>
-    <p class="hint" id="footprintPlaceholderNote">Compute the buildable area above first.</p>
-
-    <div class="checkbox-row" style="margin-top: 14px;">
-      <input type="checkbox" id="footprintIrregularToggle" autocomplete="off" />
-      <label for="footprintIrregularToggle">Footprint is irregular (arbitrary angles, entered with diagonals - like the site plot)</label>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="footprintSidesCount">Number of sides</label>
-        <input type="number" id="footprintSidesCount" min="4" max="20" step="2" value="4" />
-      </div>
-      <div class="field" id="changeShapeField">
-        <label>&nbsp;</label>
-        <button id="changeShapeBtn" type="button" class="secondary" disabled>Change shape</button>
-      </div>
-      <div class="field">
-        <label for="footprintStartX" id="footprintStartXLabel">Start X (ft)</label>
-        <input type="number" id="footprintStartX" step="any" class="footprint-start-input" />
-      </div>
-      <div class="field">
-        <label for="footprintStartY" id="footprintStartYLabel">Start Y (ft)</label>
-        <input type="number" id="footprintStartY" step="any" class="footprint-start-input" />
-      </div>
-    </div>
-    <p class="hint" id="footprintCornerNote"></p>
-
-    <div id="footprintRectilinearGroup">
-      <table class="edge-table">
-        <thead>
-          <tr>
-            <th style="width: 70px;">Vertex</th>
-            <th style="width: 220px;">Corner angle</th>
-            <th style="width: 90px;">Edge</th>
-            <th id="footprintLengthHeader">Length (ft)</th>
-          </tr>
-        </thead>
-        <tbody id="footprintRows"></tbody>
-      </table>
-    </div>
-
-    <div id="footprintIrregularGroup" style="display:none;">
-      <table class="edge-table">
-        <thead>
-          <tr>
-            <th style="width: 90px;">Edge</th>
-            <th id="footprintIrregularLengthHeader">Length (ft)</th>
-          </tr>
-        </thead>
-        <tbody id="footprintIrregularRows"></tbody>
-      </table>
-
-      <div style="margin-top: 16px;">
-        <h3 style="font-size: 14px; margin: 0 0 6px;">Diagonals from corner A</h3>
-        <p class="hint" id="footprintDiagonalsNote"></p>
-        <table class="edge-table" id="footprintDiagonalsTable" style="display:none;">
-          <thead>
-            <tr>
-              <th style="width: 90px;">Diagonal</th>
-              <th id="footprintDiagonalLengthHeader">Length (ft)</th>
-            </tr>
-          </thead>
-          <tbody id="footprintDiagonalRows"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="footprintPreviewBtn" disabled>Preview footprint</button>
-      <span id="footprintStatusNote" class="hint" style="margin: 0;"></span>
-    </div>
-
-    <div id="footprintAreaSummary" class="result-box" style="display:none;"></div>
-    <div id="footprintErrorBox" class="error-box" style="display:none;"></div>
-  </section>
-</div>
-
-<div class="shared-with-masterplan" id="finalSitePlanAlways">
-  <section class="card">
-    <h2>Final site plan</h2>
-    <p class="hint">
-      A clean, ink-only presentation view of the site plan above - plot boundary, side lengths,
-      roads, and neighbours, without the corner letters, diagonal lines, or buildable-area guide
-      line the working drawing above uses to help you construct it. North stays fixed; rotate
-      the drawing itself until its true north lines up with that fixed arrow, exactly like
-      orienting a real site plan sheet. Sits here, right above the print sheet that uses it, on
-      both the Site plan and Master plan steps.
-    </p>
-    <div class="row">
-      <button id="finaliseBtn">Finalise site plan</button>
-      <div class="field">
-        <label for="rotationInput">Rotate drawing (degrees)</label>
-        <input type="number" id="rotationInput" min="0" max="359" step="1" value="0" />
-      </div>
-    </div>
-    <div class="site-preview site-preview-large" style="position: relative;">
-      <svg id="finalSitePlanSvg" viewBox="-250 -250 1100 920" preserveAspectRatio="xMidYMid meet"></svg>
-      <div id="northIndicator" class="north-indicator">
-        <svg viewBox="0 0 80 80" width="80" height="80">
-          <line x1="40" y1="74" x2="40" y2="46" stroke="#1f2430" stroke-width="4" />
-          <polygon points="26,46 54,46 40,24" fill="#1f2430" />
-          <text x="40" y="18" font-size="20" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#1f2430">N</text>
-        </svg>
-      </div>
-    </div>
-  </section>
-</div>
-
-<div class="shared-with-masterplan" id="printSheetAlways">
-  <section class="card">
-    <h2>Print sheet</h2>
-    <p class="hint">
-      Assemble the finalised site plan above into a printable sheet, the way a surveyor's
-      sketch map presents it: a header block, the mouza (cadastral) index map, and the site
-      plan drawing together on one page. Always available here regardless of which wizard step
-      is open above, since it's the last stage of both the plain site plan and the master plan.
-    </p>
-
-    <div class="row">
-      <div class="field">
-        <label for="adminTypeSelect">Under</label>
-        <select id="adminTypeSelect">
-          <option value="Municipality" selected>Municipality</option>
-          <option value="Municipal Corporation">Municipal Corporation</option>
-          <option value="Panchayet">Panchayet</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="adminNameInput" id="adminNameLabel">Municipality name</label>
-        <input type="text" id="adminNameInput" placeholder="e.g. Purulia" />
-      </div>
-      <div class="field">
-        <label for="wardNoInput">Ward No.</label>
-        <input type="text" id="wardNoInput" placeholder="e.g. 1" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="rsKhatianInput">R.S Khatian No.</label>
-        <input type="text" id="rsKhatianInput" placeholder="e.g. 191" />
-      </div>
-      <div class="field">
-        <label for="rsPlotInput">R.S Plot No.</label>
-        <input type="text" id="rsPlotInput" placeholder="e.g. 4718/P" />
-      </div>
-      <div class="field">
-        <label for="csPlotInput">C.S Plot No.</label>
-        <input type="text" id="csPlotInput" placeholder="e.g. 968/P" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label>Sketch map</label>
-        <div class="checkbox-row">
-          <input type="radio" name="sketchScaleMode" value="nts" id="sketchScaleNTS" />
-          <label for="sketchScaleNTS">Not to scale</label>
-          <input type="radio" name="sketchScaleMode" value="scale" id="sketchScaleToScale" checked style="margin-left: 10px;" />
-          <label for="sketchScaleToScale">To scale</label>
+      <div class="row" style="margin-top: 14px;">
+        <div class="field">
+          <label>Surveyor name</label>
+          <input type="text" data-el="surveyorNameInput" placeholder="e.g. Bidyut Kumar Mahato" />
         </div>
-        <div class="ratio-row" id="sketchScaleRatioRow" style="display: flex;">
-          <input type="number" id="sketchScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="sketchScaleY" placeholder="y" min="0" step="any" value="1" />
+        <div class="field">
+          <label>Surveyor Regd. No.</label>
+          <input type="text" data-el="surveyorRegdInput" placeholder="e.g. 02711" />
+        </div>
+        <div class="field" style="flex: 1; min-width: 200px;">
+          <label>Drawn by (address)</label>
+          <input type="text" data-el="drawnByInput" placeholder="e.g. Kurmashol, Kuda, Kenda, Purulia" />
         </div>
       </div>
-      <div class="field">
-        <label>Site plan</label>
-        <div class="checkbox-row">
-          <input type="radio" name="siteScaleMode" value="nts" id="siteScaleNTS" />
-          <label for="siteScaleNTS">Not to scale</label>
-          <input type="radio" name="siteScaleMode" value="scale" id="siteScaleToScale" checked style="margin-left: 10px;" />
-          <label for="siteScaleToScale">To scale</label>
+
+      <div class="row" style="margin-top: 14px;">
+        <div class="field" style="flex: 1; min-width: 280px;">
+          <label>Additional notes (signatures, P.S./District, reference area, etc.)</label>
+          <textarea data-el="additionalNotesInput" rows="4" placeholder="P.S- ..., DIST- ...,&#10;REF. AREA- ... SQ.FT./... KATHA. ... CHH SHOWN IN"></textarea>
         </div>
-        <div class="ratio-row" id="siteScaleRatioRow" style="display: flex;">
-          <input type="number" id="siteScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="siteScaleY" placeholder="y" min="0" step="any" value="1" />
+        <div class="field">
+          <label>Mouza map image</label>
+          <input type="file" data-el="mouzaMapInput" accept="image/*" />
         </div>
       </div>
-      <div class="field">
-        <label>Mouza map</label>
-        <div class="checkbox-row">
-          <input type="radio" name="mouzaScaleMode" value="nts" id="mouzaScaleNTS" />
-          <label for="mouzaScaleNTS">Not to scale</label>
-          <input type="radio" name="mouzaScaleMode" value="scale" id="mouzaScaleToScale" checked style="margin-left: 10px;" />
-          <label for="mouzaScaleToScale">To scale</label>
-        </div>
-        <div class="ratio-row" id="mouzaScaleRatioRow" style="display: flex;">
-          <input type="number" id="mouzaScaleX" placeholder="x" min="0" step="any" value="16" />
-          <span>:</span>
-          <input type="number" id="mouzaScaleY" placeholder="y" min="0" step="any" value="1" />
-        </div>
-      </div>
+
+      <!-- Not shown in stage 1; the stage-2 overlay's own Download button drives this. -->
+      <button type="button" data-el="downloadPdfBtn" style="display:none;" disabled>Download PDF</button>
     </div>
+  </div>
 
-    <div class="row" style="margin-top: 14px;">
-      <div class="field">
-        <label for="surveyorNameInput">Surveyor name</label>
-        <input type="text" id="surveyorNameInput" placeholder="e.g. Bidyut Kumar Mahato" />
-      </div>
-      <div class="field">
-        <label for="surveyorRegdInput">Surveyor Regd. No.</label>
-        <input type="text" id="surveyorRegdInput" placeholder="e.g. 02711" />
-      </div>
-      <div class="field" style="flex: 1; min-width: 220px;">
-        <label for="drawnByInput">Drawn by (address)</label>
-        <input type="text" id="drawnByInput" placeholder="e.g. Kurmashol, Kuda, Kenda, Purulia" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <div class="field" style="flex: 1; min-width: 320px;">
-        <label for="additionalNotesInput">Additional notes (signatures, P.S./District, reference area, etc.)</label>
-        <textarea id="additionalNotesInput" rows="4" placeholder="P.S- ..., DIST- ...,&#10;REF. AREA- ... SQ.FT./... KATHA. ... CHH SHOWN IN"></textarea>
-      </div>
-      <div class="field">
-        <label for="mouzaMapInput">Mouza map image</label>
-        <input type="file" id="mouzaMapInput" accept="image/*" />
-      </div>
-    </div>
-
-    <div class="row" style="margin-top: 14px;">
-      <button id="previewPdfBtn">Preview PDF</button>
-      <button id="downloadPdfBtn" disabled>Download PDF</button>
-      <span id="pdfNote" class="hint" style="margin: 0;"></span>
-    </div>
-
-    <iframe id="pdfPreviewFrame" title="PDF preview" style="display:none; width:100%; height:640px; border:1px solid var(--border); border-radius:7px; margin-top:14px;"></iframe>
-  </section>
-</div>
-
-<div id="wizardPageNotes">
-  <section class="card">
-    <h2>What's next</h2>
-    <p class="hint">
-      The Site plan page proves out the arbitrary-shape site-plot math end to end (the
-      client-side preview is a live, pure-JS sketch of the boundary; "Compute buildable area"
-      calls the authoritative server-side <code>/compute-site</code> endpoint, which is what
-      actually gets stored). The Footprint page adds a first pass at the building footprint
-      using the same metes-and-bounds idea with square (90&deg;/270&deg;) corners, plus an
-      irregular/diagonal mode for non-rectilinear footprints. Project/legal info and
-      floors/rooms are still being built.
-    </p>
-  </section>
-</div>
-</main>
+</template>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="/static/app.js"></script>
