@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Uttam Site Planner - Independent Tools</title>
+<title>Uttam Planner 6 - Independent Tools</title>
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -14,7 +14,7 @@
      ============================================================================ -->
 <div id="homeScreen">
   <header class="home-header">
-    <h1>Uttam Site Planner <span class="badge">Beta</span></h1>
+    <h1>Uttam Planner 6 <span class="badge">Tools</span></h1>
     <p>
       Pick a tool. Site Plan and Master Plan are two separate, standalone products - each one
       starts from its own plot boundary and keeps its own data, so nothing you enter in one
@@ -181,16 +181,18 @@
         changing one side length changes the polygon's overall size, not its shape.
       </p>
 
-      <table class="edge-table">
+      <h3 style="margin-top: 16px;">Sides</h3>
+      <p class="hint" data-el="sidesNote"></p>
+      <table class="edge-table mb-grid">
         <thead>
           <tr>
             <th style="width: 74px;">Edge</th>
             <th data-el="lengthHeader">Length (ft)</th>
-            <th style="width: 130px;">Role</th>
-            <th data-el="setbackHeader" style="width: 100px;">Setback (ft)</th>
-            <th data-el="roadWidthHeader" style="width: 110px;">Road width (ft)</th>
-            <th style="width: 130px;">Neighbour name</th>
-            <th style="width: 100px;">Plot no.</th>
+            <th class="col-role" style="width: 130px;">Role</th>
+            <th data-el="setbackHeader" class="col-setback" style="width: 100px;">Setback (ft)</th>
+            <th data-el="roadWidthHeader" class="col-road-width" style="width: 110px;">Road width (ft)</th>
+            <th class="col-neighbour-name" style="width: 130px;">Neighbour name</th>
+            <th class="col-neighbour-plot" style="width: 100px;">Plot no.</th>
           </tr>
         </thead>
         <tbody data-el="edgeRows"></tbody>
@@ -199,12 +201,13 @@
       <div style="margin-top: 16px;">
         <h3>Diagonals</h3>
         <p class="hint" data-el="diagonalsNote"></p>
-        <table class="edge-table" data-el="diagonalsTable" style="display:none;">
+        <table class="edge-table mb-grid" data-el="diagonalsTable" style="display:none;">
           <thead>
             <tr>
               <th style="width: 80px;">From</th>
               <th style="width: 80px;">To</th>
               <th data-el="diagonalLengthHeader">Length (ft)</th>
+              <th style="width: 90px;"></th>
             </tr>
           </thead>
           <tbody data-el="diagonalRows"></tbody>
@@ -212,7 +215,46 @@
         <button type="button" class="secondary" data-el="addDiagonalBtn" style="display:none; margin-top: 8px;">+ Add diagonal</button>
       </div>
 
-      <div class="row" style="margin-top: 14px;">
+      <div style="margin-top: 16px;">
+        <h3>Corner placement</h3>
+        <p class="hint" data-el="cornerPlacementNote"></p>
+        <table class="edge-table mb-grid" data-el="cornerPlacementTable" style="display:none;">
+          <thead>
+            <tr>
+              <th>Corner</th>
+              <th style="width: 200px;">Bulges</th>
+            </tr>
+          </thead>
+          <tbody data-el="cornerPlacementRows"></tbody>
+        </table>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <h3>Orientation</h3>
+        <p class="hint">
+          Purely how the drawing is displayed - flips or spins the whole shape without changing
+          any side length, diagonal, or corner placement above. Useful for lining the working
+          drawing up with a hand sketch or a real site orientation while you're entering data;
+          rotating the final presentation sheet to true north is a separate step later
+          (North Setter), after this shape is finalized.
+        </p>
+        <div class="row">
+          <div class="field">
+            <label>Mirror across</label>
+            <select data-el="mirrorEdgeSelect"></select>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button type="button" class="secondary" data-el="mirrorBtn">Mirror: Off</button>
+          </div>
+          <div class="field">
+            <label>Rotate (degrees)</label>
+            <input type="number" data-el="rotationOrientationInput" value="0" step="1" />
+          </div>
+        </div>
+      </div>
+
+      <div class="row row-road-extension" style="margin-top: 14px;">
         <div class="field">
           <label data-el="roadExtensionLabel">Road extension (ft, each side)</label>
           <input type="number" data-el="roadExtension" min="0" step="1" value="15" />
@@ -236,18 +278,26 @@
       <span><span class="swatch" style="border-color:#7d5ba6; border-top-width:6px;"></span>Road</span>
     </div>
     <div class="step-actions">
-      <button type="button" class="secondary" data-el="addRoadBtn">+ Add road</button>
+      <button type="button" class="secondary" data-el="addOuterRoadBtn">+ Add outer road</button>
+      <button type="button" class="secondary" data-el="addRoadBtn">+ Add inner road</button>
       <button type="button" data-el="finalizeRoadLogicBtn">Finalize road logic</button>
       <span class="hint" data-el="finalizeRoadLogicNote"></span>
     </div>
     <div class="step-form">
       <h2>Road logic</h2>
       <p class="hint">
-        Lay out the internal road network you'll carve this plot into smaller lots along - each
-        road connects to an existing plot side, an already-placed road, or ends as a dead end.
-        The diagram updates when you finalize or add/change a road, not on every keystroke.
+        <strong>Outer roads</strong> run along a boundary side, outside the plot - name the side
+        they abut and how wide they are. <strong>Inner roads</strong> are the network you carve
+        this plot into smaller lots along; each connects to a plot side, an already-placed road,
+        or ends as a dead end. The diagram updates when you finalize or add/change a road, not on
+        every keystroke.
       </p>
-      <p class="hint" data-el="roadLogicNote">No roads yet - click "Add road" to start.</p>
+      <h3 style="margin-top: 14px;">Outer roads</h3>
+      <p class="hint" data-el="outerRoadNote">No outer roads yet - click "Add outer road" if a
+        road runs along one of the boundary sides.</p>
+      <div data-el="outerRoadRows"></div>
+      <h3 style="margin-top: 16px;">Inner roads</h3>
+      <p class="hint" data-el="roadLogicNote">No roads yet - click "Add inner road" to start.</p>
       <div data-el="roadRows"></div>
     </div>
   </div>
@@ -309,28 +359,39 @@
         plot discards an in-progress edit.
       </p>
 
-      <div class="row">
-        <div class="field">
-          <label>Add plot (promote fill plot(s) to real, e.g. S1F1 S1F2)</label>
-          <input type="text" data-el="addPlotInput" placeholder="e.g. S1F1 S1F2" />
-        </div>
-        <button type="button" class="secondary" data-el="addPlotBtn">Add plot</button>
-      </div>
-      <p class="hint" data-el="addPlotNote"></p>
-
       <div class="row" style="margin-top: 12px;">
         <div class="field">
           <label>Plot name</label>
           <input type="text" data-el="plotNameInput" placeholder="e.g. S1P1" />
         </div>
-        <button type="button" class="secondary" data-el="resetPlotBtn">Reset plot</button>
-        <button type="button" data-el="savePlotBtn">Save plot</button>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" data-el="resetPlotBtn">Reset plot</button>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" data-el="savePlotBtn">Save plot</button>
+        </div>
       </div>
       <p class="hint" data-el="plotNameNote"></p>
       <p class="hint" data-el="savePlotNote"></p>
 
       <div data-el="plotEditFields" style="display:none; margin-top: 14px;">
         <div class="row">
+          <div class="field">
+            <label>Push edge</label>
+            <select data-el="pushEdgeSelect"></select>
+          </div>
+          <div class="field" style="margin-left: auto;">
+            <label>&nbsp;</label>
+            <button type="button" class="secondary" data-el="expandPlotBtn">Expand to boundary</button>
+          </div>
+        </div>
+        <p class="hint" data-el="expandPlotNote">"Expand to boundary" sweeps the side chosen above
+          straight outward and absorbs every bit of free land it crosses, stopping at the
+          sub-section edge, a road, or the next plot - so the side count changes to match.</p>
+
+        <div class="row" style="margin-top: 12px;">
           <div class="field">
             <label>Number of sides (fixed)</label>
             <input type="number" data-el="plotSidesCount" disabled />
@@ -343,14 +404,11 @@
               <button type="button" class="secondary stepper-btn" data-el="plotAreaPlusBtn">+</button>
             </div>
           </div>
-          <div class="field">
-            <label>Push edge</label>
-            <select data-el="pushEdgeSelect"></select>
-          </div>
         </div>
         <p class="hint" data-el="plotAreaStepNote"></p>
 
-        <table class="edge-table" style="margin-top: 10px;">
+        <h3 style="margin-top: 16px;">Sides</h3>
+        <table class="edge-table">
           <thead>
             <tr><th style="width: 80px;">Edge</th><th>Length (ft)</th></tr>
           </thead>
@@ -362,15 +420,57 @@
           <p class="hint" data-el="plotDiagonalsNote"></p>
           <table class="edge-table" data-el="plotDiagonalsTable" style="display:none;">
             <thead>
-              <tr><th style="width: 80px;">From</th><th style="width: 80px;">To</th><th>Length (ft)</th></tr>
+              <tr><th style="width: 80px;">From</th><th style="width: 80px;">To</th><th>Length (ft)</th><th style="width: 90px;"></th></tr>
             </thead>
             <tbody data-el="plotDiagonalRows"></tbody>
           </table>
           <button type="button" class="secondary" data-el="addPlotDiagonalBtn" style="display:none; margin-top: 8px;">+ Add diagonal</button>
         </div>
 
+        <div style="margin-top: 16px;">
+          <h3>Corner placement</h3>
+          <p class="hint" data-el="plotCornerPlacementNote"></p>
+          <table class="edge-table" data-el="plotCornerPlacementTable" style="display:none;">
+            <thead>
+              <tr><th>Corner</th><th style="width: 200px;">Bulges</th></tr>
+            </thead>
+            <tbody data-el="plotCornerPlacementRows"></tbody>
+          </table>
+        </div>
+
         <p class="hint" data-el="plotAreaNote" style="margin-top: 12px; font-weight: 600;"></p>
       </div>
+
+      <h3 style="margin-top: 22px;">Add or combine plots</h3>
+      <div class="row">
+        <div class="field">
+          <label>Add plot (promote fill plot(s) to real, e.g. S1F1 S1F2)</label>
+          <input type="text" data-el="addPlotInput" placeholder="e.g. S1F1 S1F2" />
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" data-el="addPlotBtn">Add plot</button>
+        </div>
+      </div>
+      <p class="hint" data-el="addPlotNote"></p>
+
+      <div class="row" style="margin-top: 12px;">
+        <div class="field">
+          <label>Combine plot</label>
+          <input type="text" data-el="combinePlotAInput" placeholder="e.g. S1P1" />
+        </div>
+        <div class="field">
+          <label>with plot</label>
+          <input type="text" data-el="combinePlotBInput" placeholder="e.g. S1F1" />
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" data-el="combinePlotsBtn">Combine plots</button>
+        </div>
+      </div>
+      <p class="hint" data-el="combinePlotsNote">Merges two touching plots into one. Real plots
+        (S1P1) and fill plots (S1F1) can be combined in any mix, and the result keeps whatever
+        shape the two of them make together.</p>
 
       <div data-el="plotEditorCard" style="display:none;"></div>
 

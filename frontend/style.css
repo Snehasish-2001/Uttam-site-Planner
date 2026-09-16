@@ -556,6 +556,21 @@ table.edge-table select {
   width: 100%;
   height: 100%;
   transform-origin: 50% 50%;
+  /* The drawing is full of <text> labels. Without this, dragging to pan starts a text selection
+     instead - the labels highlight, the drag reads as a selection gesture, and the click that
+     should have selected a plot is lost to it. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---- Click-to-select affordance (Plot Editor). Only REAL plots carry .plot-hit: a fill plot or
+   open space highlighting too would promise an edit the editor will then refuse. Pure CSS, no
+   hover hit-testing in JS - the SVG is regenerated wholesale on every redraw, so there are no
+   listeners or state to keep in sync. */
+.plot-hit { cursor: pointer; }
+.plot-hit:hover {
+  fill: rgba(47, 111, 79, 0.26);
+  stroke-width: 2;
 }
 
 .zoom-canvas .step-diagram,
@@ -705,3 +720,103 @@ svg.clickable-plots { cursor: pointer; }
    than one long wrapping row, so related fields (an endpoint + its own distance) always land
    together regardless of pane width. */
 .road-row .row + .row { margin-top: 10px; }
+
+/* ---- Master Plan's Metes & Bounds table drops the Neighbour name / Plot no. columns - a
+   master-planned boundary is being subdivided, not conveyed against a named adjoining owner,
+   so those fields belong to Site Plan only. Site Plan (no [data-tool] match) keeps them. */
+.tool-shell[data-tool="master"] .col-neighbour-name,
+.tool-shell[data-tool="master"] .col-neighbour-plot {
+  display: none;
+}
+
+/* ---- Master Plan also drops the Road width column and the Road extension field from Metes &
+   Bounds: outer (boundary-abutting) roads are declared on its Road Logic step instead, next to
+   the internal ones, which is what keeps this page down to the boundary itself. Site Plan has no
+   Road Logic step (see TOOL_DEFS), so it keeps both here. */
+.tool-shell[data-tool="master"] .col-road-width,
+.tool-shell[data-tool="master"] .row-road-extension {
+  display: none;
+}
+
+/* ---- Master Plan's Metes & Bounds: Role and Setback go too. A master-planned boundary is
+   subdivided by the road network and per-plot editing that follow, not by a per-edge front/rear
+   /side role and its own setback - those stay a Site Plan concern, same as the Neighbour columns
+   above. Site Plan (no [data-tool] match) keeps all of them. */
+.tool-shell[data-tool="master"] .col-role,
+.tool-shell[data-tool="master"] .col-setback {
+  display: none;
+}
+
+/* ---- ...which leaves each Metes & Bounds row holding only a label and one or two controls, so
+   the three lists there (Sides, Diagonals, Corner placement) are laid out as a TWO-COLUMN grid
+   rather than one very long single-file table. Scoped to [data-step="mb"] so the Plot Editor's
+   own equivalent tables are untouched. The column headers are dropped with them: every row is
+   self-labelling (its own side/corner name sits in the first cell), and a header row cannot line
+   up with a grid that reflows into two columns anyway. */
+.tool-shell[data-tool="master"] .mb-grid thead {
+  display: none;
+}
+.tool-shell[data-tool="master"] .mb-grid {
+  display: block;
+  width: 100%;
+}
+.tool-shell[data-tool="master"] .mb-grid tbody {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 22px;
+}
+.tool-shell[data-tool="master"] .mb-grid tbody tr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tool-shell[data-tool="master"] .mb-grid tbody td {
+  border: none;
+  padding: 2px 0;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+/* The leading label cell (A-B, C', ...) is fixed-width so the inputs beside it line up down
+   both columns instead of stepping in and out with the label's own text width. */
+.tool-shell[data-tool="master"] .mb-grid tbody td:first-child {
+  flex: 0 0 58px;
+  font-weight: 600;
+}
+.tool-shell[data-tool="master"] .mb-grid tbody td input,
+.tool-shell[data-tool="master"] .mb-grid tbody td select {
+  width: 100%;
+  min-width: 0;
+}
+/* A diagonal's Remove button shrinks to its own text rather than taking an equal share. */
+.tool-shell[data-tool="master"] .mb-grid tbody td:has(> button) {
+  flex: 0 0 auto;
+}
+/* Corner placement states its corner and its two reference corners as one phrase in one cell
+   ("L with respect to AB"), so it is a label of ordinary width and weight - not the short fixed
+   bold letter the Sides/Diagonals lists put in their first cell. */
+.tool-shell[data-tool="master"] .mb-grid tbody td.corner-ref-cell {
+  flex: 1 1 auto;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* One column once the pane is too narrow to keep two honest - below this the inputs would be
+   too cramped to type into. */
+@media (max-width: 1100px) {
+  .tool-shell[data-tool="master"] .mb-grid tbody {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---- Mirror toggle button: a plain .secondary button until active, then filled solid so its
+   on/off state reads at a glance, same visual language a pressed toggle button uses elsewhere. */
+button.toggle-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+button.toggle-active:hover:not(:disabled) {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}

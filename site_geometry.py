@@ -20,6 +20,7 @@ import math
 
 import shapely
 from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.validation import make_valid
 from shapely.ops import split, unary_union
 
@@ -574,6 +575,11 @@ COLLINEAR_TOL_DEG = 0.5      # a turn smaller than this is a straight-through ve
 SPIKE_TOL_DEG = 179.0        # a turn larger than this is a backtracking spike
 OVERLAP_TOL_SQFT = 0.01      # per-pair overlap / out-of-bounds allowance
 AREA_BALANCE_TOL_SQFT = 0.5  # real + fill + open space must sum to the sub-section within this
+AREA_BALANCE_TOL_FRACTION = 0.0002  # ...or this share of the sub-section's own area, whichever
+                                    # is larger - snap-rounding scales with the number of pieces
+COMBINE_WELD_TOL_SQFT = 1.0  # how much area a hairline-gap weld may move before it's a distortion
+SEALED_POCKET_FRACTION = 0.99  # of a leftover piece's perimeter that must be walled in by the
+                               # expanded plot + the sub-section boundary to count as stranded
 
 
 def _snap(value):
@@ -609,12 +615,22 @@ def normalize_polygon(poly, cull_vertices=True):
     if poly is None:
         return None
     if not isinstance(poly, Polygon):
-        pts = []
-        for v in poly:
-            pts.append((v["x"], v["y"]) if isinstance(v, dict) else (v[0], v[1]))
-        if len(pts) < 3:
-            return None
-        poly = Polygon(pts)
+        if isinstance(poly, BaseGeometry):
+            # A MultiPolygon/GeometryCollection (e.g. from a unary_union of two pieces that
+            # only touch at a point once snapped to the grid) has no "list of vertices" to
+            # walk - collapse it to its largest polygonal part the same way every other
+            # union/difference result in this module already does, instead of falling into
+            # the vertex-list loop below and crashing on `for v in poly`.
+            poly = _largest_polygon(poly)
+            if poly is None:
+                return None
+        else:
+            pts = []
+            for v in poly:
+                pts.append((v["x"], v["y"]) if isinstance(v, dict) else (v[0], v[1]))
+            if len(pts) < 3:
+                return None
+            poly = Polygon(pts)
 
     if not poly.is_valid:
         poly = make_valid(poly)
@@ -739,6 +755,17 @@ def _fill_quality(poly, thresholds):
         return False, "empty"
     if poly.area < thresholds["min_area"]:
         return False, f"area {poly.area:.1f} < {thresholds['min_area']:.0f} sqft"
+    if poly.area > thresholds["max_area"]:
+        # Whole-sub-section-sized "fill" happens when insert_plots placed zero real (road-
+        # facing) plots along a frontage - _cut_lines_for() then has no real plot edges to
+        # extend cut lines from, _split_piece() has nothing to cut with, and the entire
+        # residual would otherwise sail through as ONE undivided piece: technically "land
+        # accounted for" (used + open == sub-section area), but reading on screen as vast
+        # untouched land rather than the many individually-sized parcels it should be. Failing
+        # it here instead of silently accepting it routes it into partition_residual()'s own
+        # Delaunay-triangulation fallback below (already exercised for genuine corner wedges),
+        # which subdivides it into several real, individually-accounted fill pieces instead.
+        return False, f"area {poly.area:.1f} > {thresholds['max_area']:.0f} sqft (too large for one fill plot)"
     if _min_interior_angle(poly) < thresholds["min_angle"]:
         return False, f"min angle {_min_interior_angle(poly):.1f} deg"
     if poly.buffer(-thresholds["min_width"] / 2.0).is_empty:
@@ -750,8 +777,21 @@ def _fill_quality(poly, thresholds):
 
 def _fill_thresholds(params):
     params = params or {}
+    min_area = float(params.get("fillMinArea", MIN_FILL_AREA_SQFT))
+    # No fillMaxArea override in practice (nothing in the frontend sends one) - derived instead
+    # from the sub-section's own target plot footprint (maxLength x maxWidth), the same numbers
+    # insert_plots() sized real plots against, so "too big for one fill plot" scales with
+    # whatever the user actually asked for rather than a fixed constant that would be wrong for
+    # both a 20x20 and a 200x200 target. A generous x3 multiplier - fill plots legitimately run
+    # bigger and odder-shaped than real ones - while still being nowhere near "the whole block".
+    # Falls back to a plain multiple of min_area only when a caller genuinely has no target size
+    # (there always is one in practice; this is just so the function never divides by nothing).
+    max_length = params.get("maxLength")
+    max_width = params.get("maxWidth")
+    default_max_area = float(max_length) * float(max_width) * 3.0 if max_length and max_width else min_area * 20.0
     return {
-        "min_area": float(params.get("fillMinArea", MIN_FILL_AREA_SQFT)),
+        "min_area": min_area,
+        "max_area": float(params.get("fillMaxArea", default_max_area)),
         "min_width": float(params.get("fillMinWidth", MIN_FILL_WIDTH_FT)),
         "min_angle": float(params.get("fillMinAngle", MIN_FILL_ANGLE_DEG)),
         "max_aspect": float(params.get("fillMaxAspect", MAX_FILL_ASPECT)),
@@ -801,6 +841,55 @@ def _cut_lines_for(plot_polys, piece):
             if line.intersects(piece):
                 lines.append(line)
     return lines
+
+
+def _salvage_triangle_pairs(tri_geoms, thresholds):
+    """A Delaunay triangulation of a genuinely narrow wedge (e.g. the sharp corner where two
+    road-facing runs meet at a shallow angle) tends to produce triangles that are individually
+    too sliver-thin to pass `_fill_quality()` on their own - each one inherits the wedge's own
+    acute tip angle. Two ADJACENT triangles glued back together along their shared edge often
+    form a much saner trapezoid/parallelogram that clears the same angle/aspect checks neither
+    half could alone, so this greedily re-merges touching triangle pairs (each accepted merge is
+    final - a still-failing remainder is not re-offered a second neighbour) before giving up on
+    the remainder as open space. This is what actually reclaims the S3/S4-
+    style wedge land the plain per-triangle check above was leaving on the table - confirmed
+    against a reproduced case where a 1,115 sqft sliver failed quality by a hair (18.3 deg vs
+    the 20 deg minimum) and triangulated into pieces that individually failed the same way."""
+    pieces = []
+    for tri in tri_geoms:
+        tri = normalize_polygon(tri)
+        if tri is not None:
+            pieces.append(tri)
+
+    fill, unresolved = [], []
+    for piece in pieces:
+        ok, _ = _fill_quality(piece, thresholds)
+        (fill if ok else unresolved).append(piece)
+
+    changed = True
+    while changed and len(unresolved) > 1:
+        changed = False
+        for i in range(len(unresolved)):
+            for j in range(i + 1, len(unresolved)):
+                share = unresolved[i].intersection(unresolved[j].exterior).length
+                if share <= SNAP_GRID_FT:
+                    continue
+                union = unary_union([unresolved[i], unresolved[j]])
+                if union.geom_type != "Polygon":
+                    continue  # only touch at a point once snapped - not a real merge
+                merged = normalize_polygon(union)
+                if merged is None:
+                    continue
+                ok, _ = _fill_quality(merged, thresholds)
+                if not ok:
+                    continue
+                fill.append(merged)
+                unresolved = [p for k, p in enumerate(unresolved) if k not in (i, j)]
+                changed = True
+                break
+            if changed:
+                break
+    return fill, unresolved
 
 
 def _split_piece(piece, lines, thresholds):
@@ -885,17 +974,11 @@ def partition_residual(residual, plot_polys, params=None):
                     tri_geoms = list(tris.geoms) if hasattr(tris, "geoms") else [tris]
                 except Exception:
                     tri_geoms = []
-                for tri in tri_geoms:
-                    tri = normalize_polygon(tri)
-                    if tri is None:
-                        continue
-                    tri_ok, _ = _fill_quality(tri, thresholds)
-                    if tri_ok:
-                        fill.append(tri)
-                        salvaged = True
-                    else:
-                        open_space.append(tri)
                 if tri_geoms:
+                    salvaged_fill, leftover = _salvage_triangle_pairs(tri_geoms, thresholds)
+                    fill.extend(salvaged_fill)
+                    open_space.extend(leftover)
+                    salvaged = bool(salvaged_fill)
                     continue
             if not salvaged:
                 open_space.append(part)
@@ -940,7 +1023,17 @@ def _merge_narrow_fill_pieces(fill, thresholds):
                     shares.append((share, j))
             shares.sort(reverse=True)
             for _share, j in shares:
-                merged = normalize_polygon(unary_union([fill[i], fill[j]]))
+                union = unary_union([fill[i], fill[j]])
+                if union.geom_type != "Polygon":
+                    # The "share" test above measures boundary proximity after a small buffer,
+                    # which can pass even when the two pieces only kiss at an isolated point
+                    # once snapped to the grid - the union then comes back as two disjoint
+                    # polygons. Silently keeping just the larger one (via normalize_polygon's
+                    # MultiPolygon fallback) would make the smaller piece's land vanish from
+                    # every downstream area total, which is exactly the "land unaccounted for"
+                    # invariant this function must never trigger.
+                    continue
+                merged = normalize_polygon(union)
                 if merged is None:
                     continue
                 ok, _reason = _fill_quality(merged, thresholds)
@@ -973,11 +1066,23 @@ def _absorb_failed_pieces(fill, open_space, thresholds, clip_region):
             kept.append(piece)
             continue
         # The small dilation is only there to weld two pieces whose shared edge coordinates
-        # don't match to the last decimal; clipping straight back to the residual stops that
-        # weld from spilling a hundredth of a foot over the real plot next door (which the
-        # invariant check rightly refused).
+        # don't match to the last decimal; clipping back to the residual stops that weld from
+        # spilling over the real plot next door, but the residual alone doesn't stop it
+        # spilling into a DIFFERENT fill piece sitting on the other side of the welded one -
+        # that's exactly how a fraction-of-a-sqft double-count crept into the land-balance
+        # invariant (two fill pieces overlapping by under a tenth of a sqft each, individually
+        # too small for the pairwise overlap check's own grid-erosion tolerance to catch, but
+        # adding up across many pieces). Clip the weld away from every OTHER fill piece too.
+        others = unary_union([p for k, p in enumerate(fill) if k != best_idx]) if len(fill) > 1 else None
         welded = unary_union([fill[best_idx], piece.buffer(SNAP_GRID_FT / 2)])
-        merged = normalize_polygon(_largest_polygon(welded.intersection(clip_region)) or welded)
+        if others is not None and not others.is_empty:
+            welded = welded.difference(others)
+        # No `or welded` fallback: the weld is dilated by half a grid step BEYOND the free land,
+        # so handing it back unclipped puts fill on top of whatever real plot sits next door
+        # (observed as a 0.048 sqft plot/fill overlap that then blocked the save). If the clip
+        # leaves nothing usable, the weld simply doesn't happen and the piece stays open space.
+        clipped = _largest_polygon(welded.intersection(clip_region))
+        merged = normalize_polygon(clipped) if clipped is not None else None
         ok = merged is not None and _fill_quality(merged, thresholds)[0]
         if ok and abs(merged.area - (fill[best_idx].area + piece.area)) < 1.0:
             fill[best_idx] = merged
@@ -1074,9 +1179,17 @@ def check_invariants(sub_poly, real_polys, fill_polys, open_polys):
     # the unclaimed region by half the sliver tolerance leaves exactly the pieces that are wide
     # enough to matter, so a genuinely lost block (the 227 sqft this check was written for)
     # still trips it.
+    # The allowance scales with the sub-section, because the error it is tolerating does too:
+    # every polygon here is snapped onto SNAP_GRID_FT, and each shared edge contributes a little
+    # rounding, so a block carved into 15 plots accumulates far more of it than one carved into
+    # 3. A flat 0.5 sqft is ~0.003% of a 15,000 sqft sub-section - tight enough that ordinary
+    # snapping tripped it (reported: 0.61 sqft over, which then blocked every later edit in that
+    # sub-section for a defect no edit had caused). At 0.02% the genuinely-lost-block case this
+    # check exists for - 227 sqft - is still caught with ~75x margin.
     pieces = list(real_polys) + list(fill_polys) + list(open_polys)
+    balance_tol = max(AREA_BALANCE_TOL_SQFT, sub_poly.area * AREA_BALANCE_TOL_FRACTION)
     total = sum(p.area for p in pieces)
-    if total - sub_poly.area > AREA_BALANCE_TOL_SQFT:
+    if total - sub_poly.area > balance_tol:
         problems.append(
             f"plots and open space cover {total:.2f} sqft, more than the sub-section's own "
             f"{sub_poly.area:.2f} sqft"
@@ -1084,7 +1197,7 @@ def check_invariants(sub_poly, real_polys, fill_polys, open_polys):
     elif pieces:
         unclaimed = sub_poly.difference(unary_union(pieces))
         meaningful = unclaimed.buffer(-SLIVER_TOL_FT / 2.0) if not unclaimed.is_empty else unclaimed
-        if not meaningful.is_empty and meaningful.area > AREA_BALANCE_TOL_SQFT:
+        if not meaningful.is_empty and meaningful.area > balance_tol:
             problems.append(
                 f"{unclaimed.area:.2f} sqft of the sub-section is unaccounted for - it belongs "
                 f"to no plot, fill piece or open space"
@@ -1109,6 +1222,15 @@ def check_invariants(sub_poly, real_polys, fill_polys, open_polys):
 FRONTAGE_SIMPLIFY_FT = 0.3   # only applied when it genuinely drops vertices, then re-clipped
 FRONTAGE_PROBE_FT = 0.05     # how far off the boundary counts as "still bordering free land"
 MIN_PLOT_AREA_FRACTION = 0.25  # of (frontage chord x minLength) - rejects zero-width wedges
+
+# How much of its own frontage chord a candidate plot must actually border to count as a real
+# road-facing plot. This exists to reject a fragment that floats inward, disconnected from the
+# road, yet still reaches far enough to pass the depth check - NOT to reject an ordinary plot
+# whose clipped edge sits a few thousandths of a foot off the chord because the sub-section was
+# snapped onto SNAP_GRID_FT and the client's frontage path was not. Measure it against a
+# grid-dilated candidate (see try_place), or that rounding alone silently empties whole
+# sub-sections.
+FRONTAGE_TOUCH_FRACTION = 0.9
 
 
 def _side_count(poly):
@@ -1288,12 +1410,12 @@ def insert_plots(subsection_vertices, road_facing_edges, params):
     for e in road_facing_edges or []:
         raw_path = e.get("path")
         if isinstance(raw_path, list) and len(raw_path) >= 2:
-            points = [(p["x"], p["y"]) for p in raw_path]
+            points = [(_snap(p["x"]), _snap(p["y"])) for p in raw_path]
         else:
             a, b = e.get("a"), e.get("b")
             if not a or not b:
                 continue
-            points = [(a["x"], a["y"]), (b["x"], b["y"])]
+            points = [(_snap(a["x"]), _snap(a["y"])), (_snap(b["x"]), _snap(b["y"]))]
         seg_lengths = [math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]) for i in range(len(points) - 1)]
         total = sum(seg_lengths)
         if total < 1e-6:
@@ -1403,8 +1525,14 @@ def insert_plots(subsection_vertices, road_facing_edges, params):
             # exactly the kind of stray sliver that isn't a real frontage plot. Require the
             # candidate to actually border a meaningful length of its own frontage chord.
             frontage_chord = LineString([(x0, y0), (x1, y1)])
-            touch_length = candidate.intersection(frontage_chord).length
-            if touch_length < chord_len * 0.9:
+            # Dilated by the snap grid before measuring: `sub_poly` (and therefore every
+            # candidate clipped from it) is snapped onto SNAP_GRID_FT, while the frontage path
+            # is the client's own un-snapped boundary coordinates, so a candidate's frontage
+            # side can sit a few thousandths of a foot off its own chord purely from rounding.
+            # Measured with zero tolerance, that read as "this land doesn't touch the road" and
+            # rejected EVERY slot on the run - see FRONTAGE_TOUCH_FRACTION.
+            touch_length = candidate.buffer(SNAP_GRID_FT).intersection(frontage_chord).length
+            if touch_length < chord_len * FRONTAGE_TOUCH_FRACTION:
                 best_reason = "the usable land here pulls away from the road instead of bordering it"
                 continue
             # Depth and frontage-touch alone can both be satisfied by a shape that encloses
@@ -1905,3 +2033,298 @@ def regenerate_fill(subsection_vertices, plots, params):
                       for p in open_polys],
         "invariantErrors": problems,
     }
+
+
+def _pieces_touching(geom, edge_line, tol):
+    """The connected polygonal parts of `geom` that actually border `edge_line`."""
+    kept = []
+    for part in (list(geom.geoms) if hasattr(geom, "geoms") else [geom]):
+        if part.geom_type != "Polygon" or part.is_empty or part.area <= 1e-9:
+            continue
+        if part.buffer(tol).intersection(edge_line).length > tol:
+            kept.append(part)
+    return kept
+
+
+def _sealed_pockets(leftover, expanded, sub_poly):
+    """Free-land pieces that the expansion has walled in: everything around them is either the
+    expanded plot itself or the sub-section's own boundary, so no other plot can ever reach them
+    and they would be stranded as open space forever. Absorbing them is the whole point of
+    sweeping greedily - it stops the expansion from sealing off a new sliver while removing one.
+    """
+    walls = unary_union([expanded.exterior, sub_poly.exterior])
+    pockets = []
+    for part in (list(leftover.geoms) if hasattr(leftover, "geoms") else [leftover]):
+        if part.geom_type != "Polygon" or part.is_empty or part.area <= MIN_OPEN_SPACE_SQFT:
+            continue
+        perimeter = part.exterior.length
+        if perimeter <= 1e-9:
+            continue
+        walled = part.exterior.intersection(walls.buffer(SNAP_GRID_FT)).length
+        if walled >= perimeter * SEALED_POCKET_FRACTION:
+            pockets.append(part)
+    return pockets
+
+
+def expand_plot_to_boundary(subsection_vertices, road_facing_edges, plots, target_name,
+                            edge_index, params):
+    """
+    Grow ONE plot by sweeping one of its own edges outward until it runs into something, and
+    absorbing the free land it crosses.
+
+    This is the escalation from resize_plot()'s area stepper. That stepper slides an edge while
+    keeping the side count fixed, so it can only ever reach land lying square-on to an existing
+    edge - free land around a corner, or behind an irregular boundary, is unreachable no matter
+    how many times it is pushed. Here the swept land is taken as-is, so the new edge becomes
+    whatever actually stopped it (the sub-section boundary, a road's own curve, or a neighbouring
+    plot), and the plot's side count changes to match.
+
+    Scope is the CORRIDOR the chosen edge sweeps - its own width, projected outward - plus any
+    pocket the expansion seals in (see _sealed_pockets). It deliberately does NOT take every
+    connected scrap of free land touching the edge: keeping the sweep to the edge's own width is
+    what makes the direction predictable instead of one click swallowing half the sub-section.
+    Within that corridor it takes everything reachable, so a neighbour blocking part of the width
+    yields a stepped outline rather than stopping the whole edge short.
+
+    Like combine_plots (and unlike resize_plot), check_invariants is REPORTED, not enforced.
+    """
+    sub_poly = normalize_polygon([{"x": v["x"], "y": v["y"]} for v in subsection_vertices])
+    if sub_poly is None:
+        raise SiteGeometryError("The sub-section polygon is degenerate.")
+
+    target, others, other_names = None, [], []
+    for entry in plots or []:
+        if entry.get("fill"):
+            continue                      # fill is a view of the residual, never a land owner
+        poly = normalize_polygon(entry.get("vertices") or [])
+        if poly is None:
+            continue
+        if entry.get("name") == target_name and target is None:
+            target = poly
+        else:
+            others.append(poly)
+            other_names.append(entry.get("name"))
+    if target is None:
+        return {"error": f"No real plot named {target_name!r} in this sub-section."}
+
+    coords = list(target.exterior.coords)[:-1]
+    if not isinstance(edge_index, int) or not (0 <= edge_index < len(coords)):
+        return {"error": f"Pick one of {target_name}'s own sides to expand."}
+
+    road_paths = _resolve_road_paths(road_facing_edges)
+    if edge_index in _frontage_edge_indices(coords, road_paths):
+        return {"error": f"That side of {target_name} lies on a road - expanding it would push "
+                         f"the plot into the road. Pick a side that faces free land."}
+
+    geom = _edge_geometry(coords, edge_index)
+    if geom is None:
+        return {"error": "That side has no length to sweep."}
+
+    free = sub_poly
+    for poly in [target] + others:
+        free = free.difference(poly)
+    if not free.is_valid:
+        free = make_valid(free)
+    if free.is_empty:
+        return {"error": f"There is no free land left in this sub-section for {target_name} to "
+                         f"grow into."}
+
+    # Sweep the edge along its own outward normal, far enough to cross the sub-section however it
+    # is oriented, then let the free land decide where it actually stops.
+    minx, miny, maxx, maxy = sub_poly.bounds
+    reach = math.hypot(maxx - minx, maxy - miny) + 1.0
+    (ax, ay), (bx, by) = geom["a"], geom["b"]
+    ox, oy = geom["outward"]
+    corridor = Polygon([
+        (ax, ay), (bx, by),
+        (bx + ox * reach, by + oy * reach), (ax + ox * reach, ay + oy * reach),
+    ])
+    if not corridor.is_valid:
+        corridor = make_valid(corridor)
+
+    # Opened before use: grid-snapping leaves hairline strips between a plot and its neighbours,
+    # and the corridor happily picks those up - absorbing a third of a square foot while adding
+    # several vertices to the plot (observed: a 4-sided plot coming back 5-sided with "+0 sqft").
+    # Same opening partition_residual uses on its own residual, for the same reason.
+    edge_line = LineString([geom["a"], geom["b"]])
+    swept = _pieces_touching(_open_residual(corridor.intersection(free)), edge_line, SNAP_GRID_FT)
+    if not swept:
+        return {"error": f"Nothing to absorb on that side of {target_name} - the land straight "
+                         f"out from it is already taken or outside the sub-section."}
+
+    expanded = unary_union([target] + swept)
+    if expanded.geom_type != "Polygon":
+        welded = unary_union([p.buffer(SNAP_GRID_FT) for p in [target] + swept]).buffer(-SNAP_GRID_FT)
+        expanded = _largest_polygon(welded)
+        if expanded is None:
+            return {"error": "The swept land doesn't join up with the plot into one piece."}
+
+    # Second pass: anything the sweep just walled off is taken too, so expanding never creates a
+    # new stranded sliver. Recomputed against the expanded shape, not the original.
+    leftover = free
+    for piece in swept:
+        leftover = leftover.difference(piece)
+    if not leftover.is_valid:
+        leftover = make_valid(leftover)
+    pockets = _sealed_pockets(leftover, _largest_polygon(expanded) or expanded, sub_poly)
+    if pockets:
+        joined = unary_union([expanded] + pockets)
+        # A pocket that meets the plot only at a pinch point unions into a figure-of-eight: one
+        # "Polygon" whose boundary touches itself, which the editor's own save check then rightly
+        # refuses as self-intersecting. Keep the pockets only when the result is a clean simple
+        # polygon; a pocket that can't be absorbed cleanly stays open space rather than producing
+        # a plot that cannot be saved.
+        if joined.geom_type == "Polygon" and joined.is_valid and joined.is_simple:
+            expanded = joined
+        else:
+            pockets = []
+
+    # simplify(0) drops collinear vertices without moving the boundary; culling then runs because
+    # check_invariants refuses a real plot carrying collinear/spike vertices. Side count is free
+    # to change here - that is the entire point of this operation.
+    grown = normalize_polygon(expanded.simplify(0))
+    if grown is None:
+        return {"error": "The expanded shape has no usable area left once cleaned up."}
+    # An AREA floor, not MIN_PUSH_FT - that one is a push distance, and comparing an area against
+    # it let sub-square-foot slivers through as "successful" expansions that only added vertices.
+    if grown.area - target.area < MIN_OPEN_SPACE_SQFT:
+        return {"error": f"That side of {target_name} has no free land in front of it to absorb."}
+    if grown.difference(sub_poly.buffer(SNAP_GRID_FT)).area > OVERLAP_TOL_SQFT:
+        return {"error": "The expanded plot would fall outside the sub-section."}
+    for name, other in zip(other_names, others):
+        # Eroded by the snap grid before comparing, as check_invariants does - plots that legally
+        # share an edge always show a hairline of overlap once both are snapped.
+        if (grown.buffer(-SNAP_GRID_FT).intersection(other.buffer(-SNAP_GRID_FT)).area
+                > OVERLAP_TOL_SQFT):
+            return {"error": f"The expanded plot would overlap {name}."}
+
+    updated_real = others + [grown]
+    residual = sub_poly
+    for poly in updated_real:
+        residual = residual.difference(poly)
+    if not residual.is_valid:
+        residual = make_valid(residual)
+
+    fill_polys, open_polys = partition_residual(residual, updated_real, params)
+    return {
+        "plot": _plot_record(grown, fill=False, name=target_name),
+        "absorbedArea": round(grown.area - target.area, 2),
+        "pocketCount": len(pockets),
+        "fill": [_plot_record(p, fill=True) for p in fill_polys],
+        "openSpace": [{"vertices": _polygon_to_vertex_list(p), "area": round(p.area, 2)}
+                      for p in open_polys],
+        "invariantErrors": check_invariants(sub_poly, updated_real, fill_polys, open_polys),
+    }
+
+
+def combine_plots(subsection_vertices, plots, names, params):
+    """
+    Merge two or more of ONE sub-section's plots into a single real plot.
+
+    Deliberately permissive about SHAPE - the merged outline is whatever the union actually is,
+    concave/L-shaped included, and no fill-quality gate is applied. This is a user's explicit
+    instruction about their own land, not land the generator is proposing, so the only rules
+    enforced are the structural ones that keep the drawing coherent: the result must be ONE
+    connected polygon, must stay inside the sub-section, and must not overlap a plot that wasn't
+    part of the merge.
+
+    Real and fill plots may be mixed freely. The result is always REAL: fill plots are a derived
+    view of the residual (see partition_residual), so merging one into a plot is precisely how a
+    real plot absorbs neighbouring leftover land. Any fill plot NOT named is simply rebuilt.
+
+    plots: [{"name": str, "vertices": [...], "fill": bool}, ...] - the sub-section's plots as the
+        client holds them. names: the plot names to merge, as typed.
+
+    Returns {"error": ...} or the merged plot plus the regenerated fill/open space.
+    """
+    sub_poly = normalize_polygon([{"x": v["x"], "y": v["y"]} for v in subsection_vertices])
+    if sub_poly is None:
+        raise SiteGeometryError("The sub-section polygon is degenerate.")
+
+    wanted, seen_wanted = [], set()
+    for raw in names or []:
+        name = str(raw).strip().upper()
+        if name and name not in seen_wanted:
+            seen_wanted.add(name)
+            wanted.append(name)
+    if len(wanted) < 2:
+        return {"error": "Name at least two different plots to combine."}
+
+    merging, others, found = [], [], set()
+    for entry in plots or []:
+        poly = normalize_polygon(entry.get("vertices") or [])
+        if poly is None:
+            continue
+        name = (entry.get("name") or "").strip().upper()
+        if name in seen_wanted and name not in found:
+            found.add(name)
+            merging.append(poly)
+        elif not entry.get("fill"):
+            others.append((entry.get("name"), poly))
+
+    missing = [n for n in wanted if n not in found]
+    if missing:
+        return {"error": f"No plot named {', '.join(missing)} in this sub-section - every plot "
+                         f"being combined has to live in the same one (a plot can't span a road)."}
+
+    total_area = sum(p.area for p in merging)
+    union = unary_union(merging)
+    if union.geom_type != "Polygon":
+        # Plots that visually share an edge can still sit a rounding step apart: each was snapped
+        # onto SNAP_GRID_FT independently, so their "shared" boundary can differ by a few
+        # thousandths of a foot and leave a hairline gap the union won't close. Morphologically
+        # close that gap (dilate, union, erode back) so the outline is unchanged, then insist the
+        # area still matches - a weld that moved real area is not a weld, it's a distortion.
+        welded = unary_union([p.buffer(SNAP_GRID_FT) for p in merging]).buffer(-SNAP_GRID_FT)
+        closed = _largest_polygon(welded)
+        if (closed is None or closed.geom_type != "Polygon"
+                or abs(closed.area - total_area) > COMBINE_WELD_TOL_SQFT):
+            return {"error": "Those plots don't share a boundary, so they can't become one plot - "
+                             "combining only works on plots that actually touch along an edge."}
+        union = closed
+
+    # simplify(0) first: it drops the purely collinear vertices left along the shared edge(s)
+    # without moving the boundary at all, so normalize_polygon's own culling has less to do.
+    # Culling itself still has to run (cull_vertices=True) - check_invariants refuses any real
+    # plot carrying collinear/spike vertices, so an un-culled merge is rejected outright.
+    merged = normalize_polygon(union.simplify(0))
+    if merged is None:
+        return {"error": "The combined shape has no usable area left once cleaned up."}
+    if merged.difference(sub_poly.buffer(SNAP_GRID_FT)).area > OVERLAP_TOL_SQFT:
+        return {"error": "The combined plot would fall outside the sub-section."}
+    for other_name, other in others:
+        # Eroded by the snap grid before comparing, exactly as check_invariants does it: two
+        # plots that legitimately SHARE an edge still show a hairline of overlap once both have
+        # been snapped onto SNAP_GRID_FT independently. Compared raw, that rounding artefact
+        # reads as a real collision and refuses every merge whose result touches a neighbour -
+        # i.e. essentially all of them.
+        if (merged.buffer(-SNAP_GRID_FT).intersection(other.buffer(-SNAP_GRID_FT)).area
+                > OVERLAP_TOL_SQFT):
+            return {"error": f"The combined plot would overlap {other_name}."}
+
+    updated_real = [p for _n, p in others] + [merged]
+    residual = sub_poly
+    for poly in updated_real:
+        residual = residual.difference(poly)
+    if not residual.is_valid:
+        residual = make_valid(residual)
+
+    fill_polys, open_polys = partition_residual(residual, updated_real, params)
+    # REPORTED, NOT ENFORCED - unlike _resize_result(), which blocks on these. A combine is the
+    # user stating what their own land is, and the merged outline is the union of plots that
+    # already existed, so there is no version of "refuse it" that leaves them better off. In
+    # practice the check was blocking merges over a land-balance drift of well under a square
+    # foot that the sub-section ALREADY carried before the combine (observed: a sub-section
+    # generated at 0.61 sqft over its own area, so every merge in it was refused for a defect it
+    # did not cause and could not fix). The numbers still come back so the UI can show them, the
+    # same way insert_plots and regenerate_fill already surface theirs as information.
+    problems = check_invariants(sub_poly, updated_real, fill_polys, open_polys)
+    return {
+        "plot": _plot_record(merged, fill=False),
+        "mergedCount": len(merging),
+        "fill": [_plot_record(p, fill=True) for p in fill_polys],
+        "openSpace": [{"vertices": _polygon_to_vertex_list(p), "area": round(p.area, 2)}
+                      for p in open_polys],
+        "invariantErrors": problems,
+    }
+

@@ -65,6 +65,8 @@ function createTool(toolKey, host) {
   const instanceId = `t${++instanceCounter}`;
 
   const root = document.getElementById("toolShellTemplate").content.firstElementChild.cloneNode(true);
+  root.dataset.tool = toolKey; // lets CSS/JS branch on which tool this instance is, e.g. to
+                               // hide the neighbour-name/plot-no. columns for Master Plan only
   host.innerHTML = "";
   host.appendChild(root);
 
@@ -164,6 +166,10 @@ function updateUnitLabels() {
   if (roadWidthHeader) roadWidthHeader.textContent = `Road width (${u})`;
   if (diagonalLengthHeader) diagonalLengthHeader.textContent = `Length (${u})`;
   if (roadExtensionLabel) roadExtensionLabel.textContent = `Road extension (${u}, each side)`;
+  // Master Plan hides the table headers (its Metes & Bounds lists are a two-column grid, which a
+  // header row can't line up with), so the unit has to be stated here instead of in "Length (ft)".
+  const sidesNote = $("sidesNote");
+  if (sidesNote) sidesNote.textContent = `Length of each side, in ${u}, walking the boundary in order.`;
 }
 
 function labelsFor(n) {
@@ -210,8 +216,15 @@ function triangleArea(a, b, c) {
 function interiorAnglesFromVertices(vertices) {
   // The real geometric interior angle at every vertex of an already-resolved polygon -
   // needed only to report equivalent angle values to the backend (/compute-site still
-  // expects them), never shown to the user anymore.
+  // expects them), never shown to the user anymore. Robust to EITHER winding direction: the
+  // Metes & Bounds "Mirror" option reflects the whole shape, which flips CCW to CW - without
+  // checking the polygon's own overall winding once and picking the matching turn direction,
+  // a mirrored shape's angles would each come back as the REFLEX of the real interior angle
+  // (verified: mirroring a unit square's corner gives 270 deg here instead of 90 deg without
+  // this), and /compute-site would reconstruct a completely different, likely invalid polygon
+  // from a perfectly valid mirrored one.
   const n = vertices.length;
+  const ccw = signedArea(vertices) >= 0;
   return vertices.map((v, i) => {
     const prev = vertices[(i - 1 + n) % n];
     const next = vertices[(i + 1) % n];
@@ -219,7 +232,7 @@ function interiorAnglesFromVertices(vertices) {
     const v2 = { x: next.x - v.x, y: next.y - v.y };
     const a1 = Math.atan2(v1.y, v1.x);
     const a2 = Math.atan2(v2.y, v2.x);
-    let ang = ((a1 - a2) * 180) / Math.PI;
+    let ang = ((ccw ? a1 - a2 : a2 - a1) * 180) / Math.PI;
     ang = ((ang % 360) + 360) % 360;
     return ang;
   });
@@ -308,7 +321,29 @@ function solveFromDiagonals(lengths, diagonals) {
   return { ok: true, vertices };
 }
 
-function solveFromDiagonalGraph(lengths, diagonalSpecs) {
+// Generates every size-`size` combination of the integers [0, count), as arrays, depth-first,
+// via a generator so a bounded caller (see solveFromDiagonalGraph below) can stop consuming
+// early without ever materialising combinations it will never look at.
+function* combinationsOf(count, size, start, combo) {
+  start = start || 0;
+  combo = combo || [];
+  if (combo.length === size) { yield combo.slice(); return; }
+  for (let i = start; i < count; i++) {
+    combo.push(i);
+    yield* combinationsOf(count, size, i + 1, combo);
+    combo.pop();
+  }
+}
+
+// Cross product of (i2-i1) x (p-i1) - positive means p sits to the LEFT of the directed line
+// from i1 to i2, negative means RIGHT. Used to translate a user's explicit "left"/"right"
+// corner-placement choice into a concrete solution index, and nowhere else - the sign
+// convention only has to be self-consistent, not match any particular real-world compass sense.
+function sideOfLine(i1, i2, p) {
+  return (i2.x - i1.x) * (p.y - i1.y) - (i2.y - i1.y) * (p.x - i1.x);
+}
+
+function solveFromDiagonalGraph(lengths, diagonalSpecs, cornerChoices) {
   // The general "chain triangulation" method surveyors actually use for large plots instead
   // of always measuring back to corner A (which can be impractically far away): every
   // diagonal can connect any two corners, not just A to something. This builds a full
@@ -332,42 +367,185 @@ function solveFromDiagonalGraph(lengths, diagonalSpecs) {
     if (!(from in dist[to])) dist[to][from] = length;
   });
 
-  const pts = new Array(n).fill(null);
-  pts[0] = { x: 0, y: 0 };
-  pts[1] = { x: lengths[0], y: 0 };
-  let placedCount = 2;
-  let progress = true;
-  while (placedCount < n && progress) {
-    progress = false;
-    for (let k = 0; k < n; k++) {
-      if (pts[k]) continue;
-      const knownNeighbours = Object.keys(dist[k]).map(Number).filter((j) => pts[j] !== null);
-      if (knownNeighbours.length < 2) continue;
-      const [i1, i2] = knownNeighbours;
-      const solutions = circleIntersections(pts[i1], dist[k][i1], pts[i2], dist[k][i2]);
-      if (solutions.length === 0) {
-        return {
-          ok: false,
-          error: `${labels[k]} doesn't fit: the distance from ${labels[i1]} (${dist[k][i1]} ft) and ` +
-            `from ${labels[i2]} (${dist[k][i2]} ft) can't both reach the same point. Adjust one of them.`,
-        };
+  // Places every vertex. Every corner resolved from exactly two known distances is a
+  // circle-circle intersection, which always has two mirror-image solutions - distance alone
+  // can never say which side of that pair the real boundary bulges to, that's a fact about the
+  // physical site, not something any of these numbers encode.
+  //
+  // `branchOf(idx, ctx)`, when given, is consulted for every such corner (`ctx` names it and
+  // its two reference corners: `{label, i1Label, i2Label}`) and may return 0 or 1 to force a
+  // specific solution, "left"/"right" (resolved here, relative to the directed line from the
+  // first reference corner to the second, via `sideOfLine`) for the same purpose in the units a
+  // human actually thinks in, or anything else (including nothing) to fall back to the default
+  // heuristic (whichever solution keeps the polygon's running area largest). Every corner's
+  // resolved 0/1 branch is recorded (in placement order) in `branches`, and its identity plus
+  // reference corners in `freeInfo` - together these let a caller re-run with the same choices,
+  // or specific ones flipped, and land on exactly the same corners either way; `freeInfo` alone
+  // (independent of whether placement fully succeeds) is what the UI uses to list which corners
+  // are actually ambiguous right now, so a per-corner Left/Right control can be shown next to
+  // the truly ambiguous ones instead of guessing at the shape from the diagonal graph alone.
+  function place(branchOf) {
+    const pts = new Array(n).fill(null);
+    pts[0] = { x: 0, y: 0 };
+    pts[1] = { x: lengths[0], y: 0 };
+    let placedCount = 2;
+    let progress = true;
+    let freeIndex = 0;
+    const branches = [];
+    const freeInfo = [];
+    while (placedCount < n && progress) {
+      progress = false;
+      for (let k = 0; k < n; k++) {
+        if (pts[k]) continue;
+        const knownNeighbours = Object.keys(dist[k]).map(Number).filter((j) => pts[j] !== null);
+        if (knownNeighbours.length < 2) continue;
+        const [i1, i2] = knownNeighbours;
+        const solutions = circleIntersections(pts[i1], dist[k][i1], pts[i2], dist[k][i2]);
+        if (solutions.length === 0) {
+          return {
+            ok: false,
+            error: `${labels[k]} doesn't fit: the distance from ${labels[i1]} (${dist[k][i1]} ft) and ` +
+              `from ${labels[i2]} (${dist[k][i2]} ft) can't both reach the same point. Adjust one of them.`,
+            freeInfo,
+          };
+        }
+        if (solutions.length === 1) {
+          pts[k] = solutions[0]; // no real ambiguity (h≈0) - not counted as a free corner at all
+        } else {
+          const idx = freeIndex++;
+          const ctx = { label: labels[k], i1Label: labels[i1], i2Label: labels[i2] };
+          freeInfo.push(ctx);
+          const rawForced = branchOf ? branchOf(idx, ctx) : null;
+          let forced = null;
+          if (rawForced === 0 || rawForced === 1) {
+            forced = rawForced;
+          } else if (rawForced === "left" || rawForced === "right") {
+            const sol0IsLeft = sideOfLine(pts[i1], pts[i2], solutions[0]) > 0;
+            forced = rawForced === "left" ? (sol0IsLeft ? 0 : 1) : (sol0IsLeft ? 1 : 0);
+          }
+          if (forced === 0 || forced === 1) {
+            pts[k] = solutions[forced];
+            branches[idx] = forced;
+          } else {
+            const chosen = pickOutward(pts.filter((p) => p !== null), solutions);
+            pts[k] = chosen;
+            branches[idx] = chosen === solutions[0] ? 0 : 1;
+          }
+        }
+        placedCount++;
+        progress = true;
       }
-      pts[k] = pickOutward(pts.filter((p) => p !== null), solutions);
-      placedCount++;
-      progress = true;
+    }
+
+    if (placedCount < n) {
+      const missing = pts.map((p, i) => (p ? null : labels[i])).filter(Boolean);
+      return {
+        ok: false,
+        error: `Not enough diagonals to fully determine the shape - ${missing.join(", ")} ` +
+          `${missing.length === 1 ? "isn't" : "aren't"} pinned down yet. Add a diagonal connecting ` +
+          `one of them to two corners that are already fixed.`,
+        freeInfo,
+      };
+    }
+    return { ok: true, vertices: pts, branches, freeCount: freeIndex, freeInfo };
+  }
+
+  // An explicit per-corner choice always wins, on the very first placement - not just as a tie
+  // breaker once a crossing is already found. `cornerChoices` maps a corner's OWN label (not a
+  // diagonal's from/to - a corner can be pinned by two diagonals, a diagonal and a side, or two
+  // sides, so the choice belongs to the corner, never to any one specific diagonal row) to
+  // "left" or "right"; anything else (absent, "auto") defers to the default heuristic below.
+  const pinned = (label) => {
+    const c = cornerChoices && cornerChoices[label];
+    return c === "left" || c === "right" ? c : null;
+  };
+  const base = place((idx, ctx) => pinned(ctx.label));
+  if (!base.ok) return base;
+  if (!polygonSelfIntersects(base.vertices)) return base;
+
+  // The heuristic above picked a mirror image at some corner that makes the boundary cross
+  // itself - not a data problem (every side and diagonal is still exactly what was entered),
+  // just the wrong guess at an inherently two-way choice. Search nearby alternatives: flip a
+  // small GROUP of ambiguous, NOT-explicitly-pinned corners together (starting from one at a
+  // time) rather than every 2^(free corners) combination, since the full search needs to stay
+  // fast on every keystroke. A corner the user has already pinned is never a candidate to flip -
+  // it stays exactly as they set it even while the rest is searched.
+  //
+  // Among every simple (non-crossing) alternative found, keep the one with the LARGEST total
+  // enclosed area - not just the first one found, and specifically NOT whichever needs the
+  // fewest corners flipped from the original guess (that was tried first and picked a valid but
+  // wrong mirror on a real 12-gon: needing only 2 flips instead of the actual 4, it landed on
+  // one of the 78 possible simple shapes that was a near-worst fit to the real site, ranking
+  // 69th of 78 by similarity - while "largest area" alone picked the actual correct shape,
+  // ranked 1st). This isn't a coincidence: a real plot boundary is never folded back over
+  // itself, so of every way to resolve the same lengths and diagonals into a simple polygon,
+  // the true one is never smaller than a self-intersecting "solution" would naively compute
+  // (crossing folds area back over itself) or than another valid-but-wrong mirror choice
+  // elsewhere on the shape - maximum area is the closest thing to "most like the real site"
+  // available without ever having seen the site (or without the user pinning a corner
+  // explicitly, which is always preferred over this guess when available).
+  const searchable = base.freeInfo.map((info, idx) => idx).filter((idx) => !pinned(base.freeInfo[idx].label));
+  let best = null;
+  let bestArea = -Infinity;
+  if (searchable.length > 0) {
+    const MAX_GROUP = 4;
+    const MAX_ATTEMPTS = 20000;
+    let attempts = 0;
+    search:
+    for (let groupSize = 1; groupSize <= Math.min(MAX_GROUP, searchable.length); groupSize++) {
+      for (const localFlipSet of combinationsOf(searchable.length, groupSize)) {
+        if (++attempts > MAX_ATTEMPTS) break search;
+        const flipped = new Set(localFlipSet.map((i) => searchable[i]));
+        const attempt = place((idx, ctx) => {
+          const p = pinned(ctx.label);
+          if (p) return p;
+          return flipped.has(idx) ? 1 - base.branches[idx] : base.branches[idx];
+        });
+        if (!attempt.ok || polygonSelfIntersects(attempt.vertices)) continue;
+        const area = polygonArea(attempt.vertices);
+        if (area > bestArea) {
+          bestArea = area;
+          best = attempt;
+        }
+      }
     }
   }
 
-  if (placedCount < n) {
-    const missing = pts.map((p, i) => (p ? null : labels[i])).filter(Boolean);
-    return {
-      ok: false,
-      error: `Not enough diagonals to fully determine the shape - ${missing.join(", ")} ` +
-        `${missing.length === 1 ? "isn't" : "aren't"} pinned down yet. Add a diagonal connecting ` +
-        `one of them to two corners that are already fixed.`,
-    };
+  if (best) {
+    best.autoFixedCrossing = true;
+    // Only the corners actually left on "Auto" were guessed - a corner the user pinned stayed
+    // exactly as set throughout the search, so it's not part of what needs double-checking.
+    best.autoFixedLabels = searchable.map((idx) => base.freeInfo[idx].label);
+    return best;
   }
-  return { ok: true, vertices: pts };
+
+  return {
+    ok: false,
+    error: "These exact side lengths and diagonals only produce a self-crossing shape, however " +
+      "the corners are placed - a real plot boundary can't cross itself. Try measuring one of " +
+      "the diagonals near the crossing from a different corner, or pin a corner's placement " +
+      "directly in the Corner placement section below.",
+    freeInfo: base.freeInfo,
+  };
+}
+
+// Which corners are ambiguous depends only on the diagonal graph's TOPOLOGY (n sides, and
+// which two corners each diagonal connects) - not on the actual length values, which the user
+// may still be mid-typing or leave momentarily inconsistent. So the Corner Placement list is
+// computed from a synthetic regular n-gon's own geometry (guaranteed convex, so this always
+// succeeds and never itself needs a corner pinned) purely to read off `freeInfo` - never shown,
+// never mixed into the real solve.
+function computeFreeCorners(n, diagonalSpecs) {
+  if (n < 4) return []; // a triangle has no ambiguity - 3 sides alone always fully determine it
+  const regularAngle = ((n - 2) * 180) / n;
+  const verts = walkRegular(new Array(n).fill(100), regularAngle);
+  const dist = (a, b) => Math.hypot(verts[a].x - verts[b].x, verts[a].y - verts[b].y);
+  const syntheticLengths = verts.map((v, i) => dist(i, (i + 1) % n));
+  const syntheticDiagonals = diagonalSpecs
+    .filter(({ from, to }) => from !== to)
+    .map(({ from, to }) => ({ from, to, length: dist(from, to) }));
+  const result = solveFromDiagonalGraph(syntheticLengths, syntheticDiagonals, null);
+  return result.freeInfo || [];
 }
 
 const unitSelectEl = $("unitSelect");
@@ -379,6 +557,9 @@ const diagonalRowsEl = $("diagonalRows");
 const diagonalsTableEl = $("diagonalsTable");
 const diagonalsNoteEl = $("diagonalsNote");
 const diagonalAddBtnEl = $("addDiagonalBtn");
+const cornerPlacementTableEl = $("cornerPlacementTable");
+const cornerPlacementRowsEl = $("cornerPlacementRows");
+const cornerPlacementNoteEl = $("cornerPlacementNote");
 const computeBtn = $("computeBtn");
 const closureNoteEl = $("closureNote");
 const svgEl = $("sitePreviewSvg");
@@ -386,6 +567,9 @@ const statusLogEl = $("statusLog");
 const errorBoxEl = $("errorBox");
 const resultBoxEl = $("resultBox");
 const roadExtensionEl = $("roadExtension");
+const mirrorEdgeSelectEl = $("mirrorEdgeSelect");
+const mirrorBtnEl = $("mirrorBtn");
+const rotationOrientationInputEl = $("rotationOrientationInput");
 const areaSummaryEl = $("areaSummary");
 const finaliseBtn = $("finaliseBtn");
 const rotationInputEl = $("rotationInput");
@@ -423,8 +607,11 @@ const downloadPdfBtn = $("downloadPdfBtn");
 const pdfNoteEl = $("pdfNote");
 const pdfPreviewFrameEl = $("pdfPreviewFrame");
 const addRoadBtnEl = $("addRoadBtn");
+const addOuterRoadBtnEl = $("addOuterRoadBtn");
 const roadLogicSvgEl = $("roadLogicSvg");
 const roadRowsEl = $("roadRows");
+const outerRoadRowsEl = $("outerRoadRows");
+const outerRoadNoteEl = $("outerRoadNote");
 const roadLogicNoteEl = $("roadLogicNote");
 const finalizeRoadLogicBtn = $("finalizeRoadLogicBtn");
 const finalizeRoadLogicNoteEl = $("finalizeRoadLogicNote");
@@ -444,6 +631,10 @@ const plotEditorSvgEl = $("plotEditorSvg");
 const addPlotInputEl = $("addPlotInput");
 const addPlotBtnEl = $("addPlotBtn");
 const addPlotNoteEl = $("addPlotNote");
+const combinePlotAInputEl = $("combinePlotAInput");
+const combinePlotBInputEl = $("combinePlotBInput");
+const combinePlotsBtnEl = $("combinePlotsBtn");
+const combinePlotsNoteEl = $("combinePlotsNote");
 const plotNameInputEl = $("plotNameInput");
 const plotNameNoteEl = $("plotNameNote");
 const plotEditFieldsEl = $("plotEditFields");
@@ -453,12 +644,17 @@ const plotDiagonalsNoteEl = $("plotDiagonalsNote");
 const plotDiagonalsTableEl = $("plotDiagonalsTable");
 const plotDiagonalRowsEl = $("plotDiagonalRows");
 const addPlotDiagonalBtnEl = $("addPlotDiagonalBtn");
+const plotCornerPlacementTableEl = $("plotCornerPlacementTable");
+const plotCornerPlacementRowsEl = $("plotCornerPlacementRows");
+const plotCornerPlacementNoteEl = $("plotCornerPlacementNote");
 const plotAreaNoteEl = $("plotAreaNote");
 const plotAreaMinusBtnEl = $("plotAreaMinusBtn");
 const plotAreaPlusBtnEl = $("plotAreaPlusBtn");
 const plotAreaValueEl = $("plotAreaValue");
 const plotAreaStepNoteEl = $("plotAreaStepNote");
 const pushEdgeSelectEl = $("pushEdgeSelect");
+const expandPlotBtnEl = $("expandPlotBtn");
+const expandPlotNoteEl = $("expandPlotNote");
 const resetPlotBtnEl = $("resetPlotBtn");
 const savePlotBtnEl = $("savePlotBtn");
 const savePlotNoteEl = $("savePlotNote");
@@ -467,8 +663,24 @@ let mouzaMapDataUrl = null;
 let lastPdfDoc = null;
 
 let lastBuildable = null;   // this tool's own buildable polygon, from its own /compute-site
-let currentVertices = null; // the last successfully resolved plot polygon (local coords)
+let currentVertices = null; // the last successfully resolved plot polygon (local coords),
+                             // AFTER the Mirror/Rotate orientation transform below
+let rawSolvedVertices = null; // the same shape BEFORE that transform - whatever chirality the
+                               // solver/corner-placement search itself produced. Kept separately
+                               // so /compute-site's response (reconstructed server-side by a
+                               // fixed-turn-convention walk that can land in either chirality -
+                               // see applyOrientation()'s own comment) can be lined up against
+                               // the actual solve, not against a shape the user has already
+                               // mirrored/rotated on top of it.
 let lastBuildableAreaSqft = null;
+let mirrorEnabled = false; // toggled by the Mirror button, not a checkbox's own .checked state
+// Explicit corner-placement pins for the site/master boundary and for the plot editor's own
+// reshape solve, kept separate since they're two different label spaces (A..L vs A'..L'). Maps
+// a corner's own label to "left" or "right"; a corner absent here is "Auto" (the solver's
+// self-intersection-avoiding, largest-area heuristic decides). Reset whenever the underlying
+// shape's vertex count/diagonal graph changes - see buildEdgeRows()/loadPlotForEditing().
+let cornerChoices = {};
+let plotCornerChoices = {};
 let roads = []; // resolved {name, type, width, start, end} for each road-logic row, in order
 let roadUidCounter = 0; // stable per-row id, independent of DOM position, so removing a road
                          // never shifts another row's own reference value
@@ -518,6 +730,40 @@ function isRoadRole(role) {
   return role === "road" || role === "front_road";
 }
 
+// The single source of truth for OUTER roads - the ones running along a boundary side, outside
+// the plot, as opposed to the internal network Road Logic carves through it.
+//
+// Master Plan owns these on the Road Logic step ("Add outer road"), which is what keeps the
+// Metes & Bounds page down to the boundary itself. Site Plan has no Road Logic step at all
+// (see TOOL_DEFS), so it keeps them on its own Metes & Bounds rows exactly as before - hence
+// the two branches rather than one. Every consumer (the drawing, the PDF sheet, sub-section
+// frontage detection) goes through here, so the two tools can't drift apart.
+function readOuterRoads() {
+  if (toolKey === "master") {
+    if (!outerRoadRowsEl) return [];
+    return Array.from(outerRoadRowsEl.querySelectorAll(".outer-road-row")).map((row) => ({
+      edgeIndex: parseInt(row.querySelector(".outer-road-side-select").value, 10),
+      width: displayToFeet(parseFloat(row.querySelector(".outer-road-width-input").value) || 0),
+      extension: Math.max(0, displayToFeet(parseFloat(row.querySelector(".outer-road-extension-input").value) || 0)),
+      frontRoad: false,
+    })).filter((r) => Number.isInteger(r.edgeIndex) && r.edgeIndex >= 0 && r.width > 0);
+  }
+  if (!edgeRowsEl.children.length) return [];
+  const { roles, roadWidths } = readRoleSetback();
+  const extension = Math.max(0, displayToFeet(parseFloat(roadExtensionEl.value) || 0));
+  const out = [];
+  roles.forEach((role, i) => {
+    if (isRoadRole(role) && roadWidths[i] > 0) {
+      out.push({ edgeIndex: i, width: roadWidths[i], extension, frontRoad: role === "front_road" });
+    }
+  });
+  return out;
+}
+
+function outerRoadEdgeSet() {
+  return new Set(readOuterRoads().map((r) => r.edgeIndex));
+}
+
 function readNeighbours() {
   const rows = Array.from(edgeRowsEl.querySelectorAll("tr"));
   return {
@@ -557,11 +803,27 @@ function populateDiagonalSelect(selectEl, n, labels, excludeSet) {
   else if (selectEl.options.length) selectEl.selectedIndex = 0;
 }
 
+// "A-B", "B-C", ... for whichever edge Mirror should reflect across - rebuilt alongside the
+// edge rows themselves, since the option list depends only on side count, not on any length.
+function mirrorEdgeOptions(n) {
+  const labels = labelsFor(n);
+  return Array.from({ length: n }, (_, i) => ({
+    value: String(i),
+    text: `${labels[i]}-${labels[(i + 1) % n]}`,
+  }));
+}
+
 function buildEdgeRows() {
   const n = Math.max(3, Math.min(20, parseInt(sidesCountEl.value, 10) || 4));
   sidesCountEl.value = n;
   const labels = labelsFor(n);
   const regularAngle = ((n - 2) * 180) / n;
+
+  cornerChoices = {}; // a new side count invalidates every previous corner pin's meaning
+  populateSelectOptions(mirrorEdgeSelectEl, mirrorEdgeOptions(n)); // defaults to index 0 = A-B
+                                                                    // when the old value (an edge
+                                                                    // index from before) no longer
+                                                                    // exists at the new side count
 
   edgeRowsEl.innerHTML = "";
 
@@ -589,13 +851,15 @@ function buildEdgeRows() {
     tr.appendChild(lengthTd);
 
     const roleTd = document.createElement("td");
+    roleTd.className = "col-role";
     const roleSelect = document.createElement("select");
     roleSelect.className = "role-select";
+    // Master Plan declares outer roads on its Road Logic step instead, so the two road roles
+    // (and the Road width column beside them) are not offered here - see readOuterRoads().
     [
       ["", "-"],
       ["front", "Front"],
-      ["road", "Road"],
-      ["front_road", "Front / Road"],
+      ...(toolKey === "master" ? [] : [["road", "Road"], ["front_road", "Front / Road"]]),
       ["rear", "Rear"],
       ["side", "Side"],
     ].forEach(([val, text]) => {
@@ -609,6 +873,7 @@ function buildEdgeRows() {
     tr.appendChild(roleTd);
 
     const setbackTd = document.createElement("td");
+    setbackTd.className = "col-setback";
     const setbackInput = document.createElement("input");
     setbackInput.type = "number";
     setbackInput.step = "0.5";
@@ -619,6 +884,7 @@ function buildEdgeRows() {
     tr.appendChild(setbackTd);
 
     const roadWidthTd = document.createElement("td");
+    roadWidthTd.className = "col-road-width";
     const roadWidthInput = document.createElement("input");
     roadWidthInput.type = "number";
     roadWidthInput.step = "0.5";
@@ -632,7 +898,14 @@ function buildEdgeRows() {
     roadWidthTd.appendChild(roadWidthInput);
     tr.appendChild(roadWidthTd);
 
+    // Hidden (not just visually, the whole <td>) for Master Plan via CSS on `.col-neighbour-*`
+    // keyed off `[data-tool="master"]` - a master-planned plot is being subdivided, not
+    // conveyed against a named neighbour, so these fields don't apply there the way they do
+    // for a real site plan. The inputs still exist in the DOM either way (readNeighbours()
+    // just reads empty strings for Master Plan), so no other code needs to know the columns
+    // are hidden.
     const neighbourNameTd = document.createElement("td");
+    neighbourNameTd.className = "col-neighbour-name";
     const neighbourNameInput = document.createElement("input");
     neighbourNameInput.type = "text";
     neighbourNameInput.className = "neighbour-name-input";
@@ -642,6 +915,7 @@ function buildEdgeRows() {
     tr.appendChild(neighbourNameTd);
 
     const neighbourPlotTd = document.createElement("td");
+    neighbourPlotTd.className = "col-neighbour-plot";
     const neighbourPlotInput = document.createElement("input");
     neighbourPlotInput.type = "text";
     neighbourPlotInput.className = "neighbour-plot-input";
@@ -674,7 +948,8 @@ function buildEdgeRows() {
   // Every fresh side count starts life as its own regular polygon (frozen: diagonal
   // fields, if shown, are just seeded from it, not yet re-solved from user input).
   const lengths = readLengths();
-  currentVertices = walkRegular(lengths, regularAngle);
+  rawSolvedVertices = walkRegular(lengths, regularAngle);
+  currentVertices = applyOrientation(rawSolvedVertices);
   buildDiagonalRows();
   drawPreview(currentVertices, lastBuildable);
   closureNoteEl.textContent = regularToggleEl.checked ? "Regular polygon - always closes exactly." : "";
@@ -689,9 +964,14 @@ function diagonalSeedLength(fromIndex, toIndex) {
   return displayToFeet(20);
 }
 
-function addDiagonalRow(defaultFrom, defaultTo) {
+function addDiagonalRow(defaultFrom, defaultTo, removable) {
   // defaultTo === null means "just pick the first valid target" - used by the Add Diagonal
   // button, where there's no particular vertex the new row is expected to connect to.
+  // `removable` marks a diagonal added ON TOP of the N-3 that are actually needed to fully
+  // determine the shape - over-specifying it, kept only because it happened to be an easier
+  // measurement to take on site. Only those rows get a Remove button; the required rows
+  // buildDiagonalRows() seeds can't be removed; removing one from a solved shape would leave
+  // it under-determined again.
   const n = currentSideCount();
   const labels = labelsFor(n);
   const tr = document.createElement("tr");
@@ -730,14 +1010,31 @@ function addDiagonalRow(defaultFrom, defaultTo) {
   fromSelect.addEventListener("change", () => {
     populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, parseInt(fromSelect.value, 10)));
     reseed();
+    rebuildCornerPlacementRows(); // which corners are ambiguous can change with the graph shape
     onDiagonalChanged();
   });
   toSelect.addEventListener("change", () => {
     reseed();
+    rebuildCornerPlacementRows();
     onDiagonalChanged();
   });
   input.addEventListener("input", onDiagonalChanged);
   input.addEventListener("change", onDiagonalChanged);
+
+  const removeTd = document.createElement("td");
+  if (removable) {
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "secondary diagonal-remove-btn";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      tr.remove();
+      rebuildCornerPlacementRows();
+      onDiagonalChanged();
+    });
+    removeTd.appendChild(removeBtn);
+  }
+  tr.appendChild(removeTd);
 
   diagonalRowsEl.appendChild(tr);
 }
@@ -750,6 +1047,7 @@ function buildDiagonalRows() {
     diagonalsTableEl.style.display = "none";
     diagonalAddBtnEl.style.display = "none";
     diagonalsNoteEl.textContent = "Not needed for a regular polygon - every diagonal follows automatically from the side length and vertex count.";
+    rebuildCornerPlacementRows();
     return;
   }
 
@@ -758,6 +1056,7 @@ function buildDiagonalRows() {
     diagonalsTableEl.style.display = "none";
     diagonalAddBtnEl.style.display = "none";
     diagonalsNoteEl.textContent = "None needed - 3 sides alone fully determine a triangle.";
+    rebuildCornerPlacementRows();
     return;
   }
 
@@ -765,12 +1064,134 @@ function buildDiagonalRows() {
     `${count} diagonal(s) needed to fully determine this ${n}-sided shape - seeded below from ` +
     `corner A, matching the shape currently shown. Change which corners a diagonal connects with ` +
     `the dropdowns, or use "Add diagonal" for an extra one if that's easier to measure on site.`;
-  diagonalsTableEl.style.display = "table";
+  diagonalsTableEl.style.display = ""; // "" not "table": Master Plan restyles these as a
+  // two-column grid (see style.css), and an inline display:table would override it.
   diagonalAddBtnEl.style.display = "inline-block";
 
   for (let k = 2; k <= n - 2; k++) {
     addDiagonalRow(0, k);
   }
+  rebuildCornerPlacementRows();
+}
+
+// Rebuilds the Corner placement list from the CURRENT diagonal graph topology (side count +
+// which corners each diagonal connects) - never from the actual length values, so this only
+// needs re-running when that topology changes (sides count, regular toggle, a diagonal's own
+// from/to, or one being added/removed), not on every length keystroke. Existing choices for
+// corners that are still ambiguous are preserved; a select is rebuilt either way since the
+// underlying DOM row is always fresh, but its value is restored from `cornerChoices`.
+function rebuildCornerPlacementRows() {
+  const n = currentSideCount();
+  const diagonalSpecs = regularToggleEl.checked ? [] : readDiagonalSpecs();
+  const freeInfo = regularToggleEl.checked ? [] : computeFreeCorners(n, diagonalSpecs);
+
+  // Corners no longer ambiguous (or no longer existing) shouldn't keep a stale pin around.
+  const stillFree = new Set(freeInfo.map((info) => info.label));
+  Object.keys(cornerChoices).forEach((label) => { if (!stillFree.has(label)) delete cornerChoices[label]; });
+
+  cornerPlacementRowsEl.innerHTML = "";
+  if (!freeInfo.length) {
+    cornerPlacementTableEl.style.display = "none";
+    cornerPlacementNoteEl.textContent = regularToggleEl.checked
+      ? "Not needed for a regular polygon - every corner follows automatically."
+      : "No ambiguous corners with the current diagonals - each one is fully pinned by its own two reference distances.";
+    return;
+  }
+
+  cornerPlacementNoteEl.textContent =
+    "Distance alone can't say which side of two reference corners a corner actually sits on - " +
+    "leave \"Auto\" to let the drawing decide (it avoids a self-crossing shape automatically, " +
+    "and warns when it had to guess), or set one directly if you already know which side matches your site.";
+  cornerPlacementTableEl.style.display = ""; // "" not "table": Master Plan restyles these as a
+  // two-column grid (see style.css), and an inline display:table would override it.
+
+  freeInfo.forEach(({ label, i1Label, i2Label }) => {
+    const tr = document.createElement("tr");
+    // One cell, one font: "L with respect to AB" reads as a sentence, where a bold corner letter
+    // beside a separate muted "using A, B" read as two unrelated columns.
+    const cornerTd = document.createElement("td");
+    cornerTd.className = "corner-ref-cell";
+    cornerTd.textContent = `${label} with respect to ${i1Label}${i2Label}`;
+    tr.appendChild(cornerTd);
+    const selectTd = document.createElement("td");
+    const select = document.createElement("select");
+    select.className = "corner-bulge-select";
+    select.innerHTML =
+      `<option value="auto">Auto</option>` +
+      `<option value="left">Left of ${i1Label}→${i2Label}</option>` +
+      `<option value="right">Right of ${i1Label}→${i2Label}</option>`;
+    select.value = cornerChoices[label] || "auto";
+    select.addEventListener("change", () => {
+      if (select.value === "auto") delete cornerChoices[label];
+      else cornerChoices[label] = select.value;
+      resolveAndRedraw();
+    });
+    selectTd.appendChild(select);
+    tr.appendChild(selectTd);
+    cornerPlacementRowsEl.appendChild(tr);
+  });
+}
+
+// Clears the step message area, but only if it's currently showing the "auto-fixed a
+// self-crossing shape" note from a previous solve - never an unrelated message that happens to
+// be showing (e.g. from a Compute area click), which resolveAndRedraw() has no business erasing.
+function clearAutofixNoteIfShown() {
+  if (messageAreaEl.dataset.autofixNote === "1") {
+    clearMessage();
+    delete messageAreaEl.dataset.autofixNote;
+  }
+}
+
+// Reflects point p across the infinite line through a and b (not just the segment) - the
+// standard "project onto the line, then go the same distance again on the other side" formula.
+function reflectAcrossLine(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy || 1;
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  const qx = a.x + t * dx, qy = a.y + t * dy;
+  return { x: 2 * qx - p.x, y: 2 * qy - p.y };
+}
+
+// Mirror reflects the resolved shape across whichever of its own edges is chosen in
+// `mirrorEdgeSelectEl` (A-B by default) - both endpoints of that edge stay exactly where they
+// are, everything else flips to the other side. Rotate then spins the result around A, which
+// stays pinned at the origin throughout, easy to reason about and to keep in sync with anything
+// else built from `currentVertices` (Road Logic's edge/side references are plain array indices,
+// unaffected by either transform). Both are pure functions of the current toggle/field state,
+// applied fresh every time from the untouched solve - never accumulated onto an already-
+// transformed shape - so flipping Mirror on and off, changing its edge, or changing the
+// rotation value, can never drift or double up.
+function applyOrientation(vertices) {
+  if (!vertices || !vertices.length) return vertices;
+  let pts = vertices;
+  if (mirrorEnabled) {
+    const n = vertices.length;
+    const edgeIdx = ((parseInt(mirrorEdgeSelectEl.value, 10) || 0) % n + n) % n;
+    const a = vertices[edgeIdx], b = vertices[(edgeIdx + 1) % n];
+    pts = pts.map((v) => reflectAcrossLine(v, a, b));
+  }
+  const deg = parseFloat(rotationOrientationInputEl.value) || 0;
+  if (deg % 360 !== 0) {
+    const rad = (deg * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    pts = pts.map((v) => ({ x: v.x * cos - v.y * sin, y: v.x * sin + v.y * cos }));
+  }
+  return pts;
+}
+
+// /compute-site reconstructs the plot server-side from (lengths, interior angles) via a fixed
+// left-turn walk (site_geometry.vertices_from_edges) - and mirroring a shape never changes any
+// of its interior angles, so that data cannot say which of the two possible chiralities is the
+// real one. Confirmed empirically: for a client shape solved CW, the server came back as the
+// exact Y-mirror (identical x, negated y at every vertex) of it. Left uncorrected, the
+// buildable-area polygon computed from that reconstruction would come back mirrored relative
+// to the actual plot boundary it's meant to sit inside - lining it up against the RAW
+// (pre-Mirror/Rotate) client solve, before the user's own chosen orientation is re-applied on
+// top, is what keeps the two always agreeing.
+function alignServerChirality(serverVertices, reference) {
+  if (!serverVertices || !reference || !reference.length) return serverVertices;
+  const same = (signedArea(serverVertices) >= 0) === (signedArea(reference) >= 0);
+  return same ? serverVertices : serverVertices.map((v) => ({ x: v.x, y: -v.y }));
 }
 
 function resolveAndRedraw() {
@@ -779,15 +1200,17 @@ function resolveAndRedraw() {
   const regularAngle = ((n - 2) * 180) / n;
 
   if (regularToggleEl.checked) {
-    currentVertices = walkRegular(lengths, regularAngle);
+    rawSolvedVertices = walkRegular(lengths, regularAngle);
+    currentVertices = applyOrientation(rawSolvedVertices);
     closureNoteEl.textContent = "Regular polygon - always closes exactly.";
     closureNoteEl.classList.remove("closure-error");
+    clearAutofixNoteIfShown(); // a regular polygon has no diagonals, so no crossing risk at all
     drawPreview(currentVertices, lastBuildable);
     return;
   }
 
   const diagonalSpecs = readDiagonalSpecs();
-  const result = solveFromDiagonalGraph(lengths, diagonalSpecs);
+  const result = solveFromDiagonalGraph(lengths, diagonalSpecs, cornerChoices);
   if (!result.ok) {
     showError(result.error);
     closureNoteEl.textContent = "Could not solve a closed shape - see the message above.";
@@ -795,9 +1218,33 @@ function resolveAndRedraw() {
     return; // keep showing the last valid currentVertices, don't blank the preview
   }
   clearError();
-  currentVertices = result.vertices;
-  closureNoteEl.textContent = "Closes exactly (solved from your side lengths and diagonals).";
-  closureNoteEl.classList.remove("closure-error");
+  rawSolvedVertices = result.vertices;
+  currentVertices = applyOrientation(rawSolvedVertices);
+  if (result.autoFixedCrossing) {
+    // Every side/diagonal length is exactly as entered - the solver just had to pick a
+    // different (still fully consistent) mirror image at one or more corners to keep the
+    // boundary from crossing itself. Worth flagging as a warning, not silently absorbing it,
+    // since the corner in question could still land on the wrong side of your actual site. Name
+    // exactly which corners were guessed (never one the user already pinned, see
+    // solveFromDiagonalGraph's `autoFixedLabels`) so there's a specific, actionable next step -
+    // check those rows in Corner placement, not "somewhere in this drawing".
+    closureNoteEl.textContent =
+      "Closes exactly - an alternate corner placement was used automatically to avoid a self-crossing shape.";
+    closureNoteEl.classList.remove("closure-error");
+    const guessedList = (result.autoFixedLabels || []).join(", ");
+    setMessage(
+      `An alternate corner placement was used automatically to avoid a self-crossing shape - ` +
+      `distance alone can't tell which side of a diagonal the boundary actually bulges to. ` +
+      `Guessed corner(s): ${guessedList || "unknown"}. If the drawing doesn't match your site, ` +
+      `set the correct side directly for one of them in Corner placement below.`,
+      "warning",
+    );
+    messageAreaEl.dataset.autofixNote = "1";
+  } else {
+    closureNoteEl.textContent = "Closes exactly (solved from your side lengths and diagonals).";
+    closureNoteEl.classList.remove("closure-error");
+    clearAutofixNoteIfShown();
+  }
   drawPreview(currentVertices, lastBuildable);
 }
 
@@ -877,14 +1324,11 @@ function buildPlotSvg(plotVertices, options) {
   // transform is built from - otherwise a road band gets clipped off the edge of the SVG
   // canvas.
   let roadSegments = [];
-  if (edgeRowsEl.children.length === plotVertices.length) {
-    const { roles, roadWidths } = readRoleSetback();
+  {
     const ccw = signedArea(plotVertices) > 0;
-    const extension = Math.max(0, displayToFeet(parseFloat(roadExtensionEl.value) || 0));
-    plotVertices.forEach((v, i) => {
-      if (!isRoadRole(roles[i])) return;
-      const width = roadWidths[i] || 0;
-      if (width <= 0) return;
+    readOuterRoads().forEach(({ edgeIndex: i, width, extension, frontRoad }) => {
+      if (i >= plotVertices.length) return;
+      const v = plotVertices[i];
       const next = plotVertices[(i + 1) % plotVertices.length];
       const dx = next.x - v.x, dy = next.y - v.y;
       const elen = Math.hypot(dx, dy) || 1;
@@ -898,8 +1342,7 @@ function buildPlotSvg(plotVertices, options) {
       const outerB = { x: extNext.x + nrm.x * width, y: extNext.y + nrm.y * width };
       roadSegments.push({
         v: extV, next: extNext, outerA, outerB, width,
-        along: { x: ux, y: uy }, extension,
-        frontRoad: roles[i] === "front_road",
+        along: { x: ux, y: uy }, extension, frontRoad,
       });
     });
   }
@@ -987,6 +1430,15 @@ function buildPlotSvg(plotVertices, options) {
   const neighbourData = rowsMatch ? readNeighbours() : { names: [], plots: [] };
   const neighbourNames = neighbourData.names, neighbourPlots = neighbourData.plots;
 
+  // Master Plan has no Neighbour name/Plot no. columns (see buildEdgeRows) - a master-planned
+  // boundary is being subdivided, not conveyed against a named adjoining owner - so nothing
+  // else wants the space just outside the boundary there. Its length labels move out to that
+  // space, matching a real subdivision/dimensioned-plan convention of setting dimensions
+  // outside the shape rather than crowding them inside one that's about to be full of
+  // sub-section and plot detail. Site Plan is unchanged: length stays inside, neighbour info
+  // (when entered) sits outside.
+  const lengthOutside = toolKey === "master";
+
   plotVertices.forEach((v, i) => {
     const next = plotVertices[(i + 1) % plotVertices.length];
     const length = Math.hypot(next.x - v.x, next.y - v.y);
@@ -994,25 +1446,29 @@ function buildPlotSvg(plotVertices, options) {
     const dx = mid.x - centroid.x, dy = mid.y - centroid.y;
     const dlen = Math.hypot(dx, dy) || 1;
 
-    // Length label: inside the polygon, running alongside the side (matching a real
-    // surveyor's sketch map convention).
     const insidePoint = { x: mid.x - (dx / dlen) * nudge, y: mid.y - (dy / dlen) * nudge };
-    const pInside = transform(insidePoint);
+    const outsidePoint = { x: mid.x + (dx / dlen) * nudge, y: mid.y + (dy / dlen) * nudge };
+    const pLength = transform(lengthOutside ? outsidePoint : insidePoint);
     const pv = transform(v), pn = transform(next);
     const screenLen = Math.hypot(pn.x - pv.x, pn.y - pv.y);
     let angleDeg = (Math.atan2(pn.y - pv.y, pn.x - pv.x) * 180) / Math.PI;
     if (angleDeg > 90 || angleDeg < -90) angleDeg += 180; // keep text upright/readable
 
+    // Font size scales with the side's own on-screen length, not a fixed size - a short side
+    // gets small text instead of overlapping its neighbours' labels, a long side gets bigger,
+    // clearer text, the same rule fontSizeForEdgeText already applies to every other edge label
+    // in this drawing (neighbour text below, diagonal/plot labels elsewhere).
     const lengthText = `${feetToDisplay(length).toFixed(2)} ${unitLabel()}`;
     const lengthFontSize = fontSizeForEdgeText(screenLen, lengthText.length, 6.5, 12);
-    svg += `<text x="${pInside.x.toFixed(1)}" y="${pInside.y.toFixed(1)}" font-size="${lengthFontSize.toFixed(1)}" font-weight="600" ` +
+    svg += `<text x="${pLength.x.toFixed(1)}" y="${pLength.y.toFixed(1)}" font-size="${lengthFontSize.toFixed(1)}" font-weight="600" ` +
       `fill="${lengthLabelColor}" text-anchor="middle" dominant-baseline="middle" ` +
-      `transform="rotate(${angleDeg.toFixed(1)} ${pInside.x.toFixed(1)} ${pInside.y.toFixed(1)})">${lengthText}</text>`;
+      `transform="rotate(${angleDeg.toFixed(1)} ${pLength.x.toFixed(1)} ${pLength.y.toFixed(1)})">${lengthText}</text>`;
 
-    // Neighbour name/plot: outside the polygon (where the length label used to sit),
-    // only for non-road edges that have something entered.
-    if (!isRoadRole(edgeRoles[i]) && (neighbourNames[i] || neighbourPlots[i])) {
-      const outsidePoint = { x: mid.x + (dx / dlen) * nudge, y: mid.y + (dy / dlen) * nudge };
+    // Neighbour name/plot: outside the polygon, only for non-road edges that have something
+    // entered - never reachable for Master Plan (its neighbour inputs are hidden and stay
+    // empty), and would collide with the length label there if it ever were, since Master
+    // Plan's length label now sits at this same outside spot.
+    if (!lengthOutside && !isRoadRole(edgeRoles[i]) && (neighbourNames[i] || neighbourPlots[i])) {
       const pOutside = transform(outsidePoint);
       const parts = [];
       if (neighbourNames[i]) parts.push(neighbourNames[i]);
@@ -1451,9 +1907,19 @@ async function computeSite() {
       return false;
     }
 
-    lastBuildable = data.buildable.vertices;
+    // The server reconstructs the plot from (lengths, interior angles) via its own fixed-turn
+    // walk, which can land on either chirality - nothing in that data says which one is real,
+    // since mirroring never changes an interior angle. Line its response up against the RAW
+    // (pre-Mirror/Rotate) solve actually produced client-side before re-applying the user's own
+    // chosen orientation on top - otherwise "Compute area" could silently flip the buildable
+    // outline relative to the plot boundary it's meant to sit inside, or snap the drawing back
+    // out of whatever Mirror/Rotate the user had set.
+    const alignedPlot = alignServerChirality(data.plot.vertices, rawSolvedVertices);
+    const alignedBuildable = alignServerChirality(data.buildable.vertices, rawSolvedVertices);
+    const orientedPlot = applyOrientation(alignedPlot);
+    lastBuildable = applyOrientation(alignedBuildable);
     lastBuildableAreaSqft = polygonArea(lastBuildable);
-    drawPreview(data.plot.vertices, lastBuildable);
+    drawPreview(orientedPlot, lastBuildable);
     drawRoadLogicPreview(); // keep the Road Logic step's own preview in sync too
 
     let msg = `Buildable area computed (${data.buildable.vertices.length} vertices).`;
@@ -1495,8 +1961,16 @@ unitSelectEl.addEventListener("change", () => {
     const v = parseFloat(el.value);
     if (!isNaN(v)) el.value = (v * factor).toFixed(2);
   };
-  root.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input").forEach(convert);
+  root.querySelectorAll(".length-input, .setback-input, .diagonal-input, .road-width-input, "
+                      + ".outer-road-width-input, .outer-road-extension-input").forEach(convert);
   convert(roadExtensionEl);
+  // Outer-road rows bake the unit into their own field labels when built, so they need
+  // re-labelling here the way updateUnitLabels() handles every fixed label in the markup.
+  root.querySelectorAll(".outer-road-row").forEach((row) => {
+    const labels = row.querySelectorAll("label");
+    if (labels[1]) labels[1].textContent = `Width (${unitLabel()})`;
+    if (labels[2]) labels[2].textContent = `Road extension (${unitLabel()}, each side)`;
+  });
 
   resolveAndRedraw();
 });
@@ -1504,6 +1978,29 @@ unitSelectEl.addEventListener("change", () => {
 sidesCountEl.addEventListener("change", buildEdgeRows);
 roadExtensionEl.addEventListener("input", () => drawPreview(currentVertices, lastBuildable));
 roadExtensionEl.addEventListener("change", () => drawPreview(currentVertices, lastBuildable));
+// Mirror/Rotate are pure display-orientation toggles - re-run the exact same solve/orientation
+// pipeline resolveAndRedraw() already does on every other edit, rather than trying to transform
+// the already-computed currentVertices in place (which would accumulate rounding error over
+// repeated edits and risks drifting out of sync with rawSolvedVertices).
+//
+// Mirror is a toggle BUTTON, not a checkbox - clicking it flips `mirrorEnabled` and the button's
+// own label/look reflect that state directly, same as any other on/off action button in this UI.
+// The button just says "Mirror" and does it - pressing it flips the drawing across the side
+// picked in "Mirror across", pressing it again puts it back. No "On/Off" in the label: the
+// diagram itself is the feedback, and the button's own pressed styling carries the state.
+function updateMirrorBtn() {
+  mirrorBtnEl.textContent = "Mirror";
+  mirrorBtnEl.classList.toggle("toggle-active", mirrorEnabled);
+  mirrorBtnEl.setAttribute("aria-pressed", mirrorEnabled ? "true" : "false");
+}
+mirrorBtnEl.addEventListener("click", () => {
+  mirrorEnabled = !mirrorEnabled;
+  updateMirrorBtn();
+  resolveAndRedraw();
+});
+mirrorEdgeSelectEl.addEventListener("change", resolveAndRedraw);
+rotationOrientationInputEl.addEventListener("input", resolveAndRedraw);
+rotationOrientationInputEl.addEventListener("change", resolveAndRedraw);
 finaliseBtn.addEventListener("click", renderFinalSitePlan);
 rotationInputEl.addEventListener("input", renderFinalSitePlan);
 rotationInputEl.addEventListener("change", renderFinalSitePlan);
@@ -1551,7 +2048,8 @@ regularToggleEl.addEventListener("change", () => {
 });
 computeBtn.addEventListener("click", computeSite);
 diagonalAddBtnEl.addEventListener("click", () => {
-  addDiagonalRow(0, null);
+  addDiagonalRow(0, null, true);
+  rebuildCornerPlacementRows();
   onDiagonalChanged();
 });
 
@@ -1632,6 +2130,58 @@ function distanceFieldLabel(ref) {
     return `Distance from start of ${name} (ft)`;
   }
   return "Distance (ft)";
+}
+
+// One OUTER road: a road running along a boundary side, outside the plot. It needs no name and
+// no endpoints - the side it abuts identifies it - so it is a much smaller row than an inner
+// road's, which is the whole reason these moved off the Metes & Bounds page.
+function addOuterRoadRow() {
+  const div = document.createElement("div");
+  div.className = "road-row outer-road-row";
+  div.style.cssText = "border:1px solid var(--border); border-radius:7px; padding:10px 12px; margin-top:10px;";
+  div.innerHTML =
+    `<div class="row">` +
+    `<div class="field"><label>Side</label><select class="outer-road-side-select"></select></div>` +
+    `<div class="field"><label>Width (${unitLabel()})</label>` +
+    `<input type="number" class="outer-road-width-input" step="any" min="0.1" value="${feetToDisplay(20).toFixed(2)}" /></div>` +
+    `<div class="field"><label>Road extension (${unitLabel()}, each side)</label>` +
+    `<input type="number" class="outer-road-extension-input" step="any" min="0" value="${feetToDisplay(15).toFixed(2)}" /></div>` +
+    `<div class="field"><label>&nbsp;</label>` +
+    `<button type="button" class="secondary outer-road-remove-btn">Remove</button></div>` +
+    `</div>`;
+  outerRoadRowsEl.appendChild(div);
+
+  const sideSelect = div.querySelector(".outer-road-side-select");
+  const n = currentVertices ? currentVertices.length : 0;
+  const labels = labelsFor(n);
+  populateSelectOptions(sideSelect, Array.from({ length: n }, (_, i) => ({
+    value: String(i),
+    text: `${labels[i]}-${labels[(i + 1) % n]}`,
+  })));
+
+  const refresh = () => {
+    updateOuterRoadNote();
+    drawPreview(currentVertices, lastBuildable);
+    drawRoadLogicPreview();
+  };
+  div.querySelector(".outer-road-remove-btn").addEventListener("click", () => {
+    div.remove();
+    refresh();
+  });
+  [sideSelect, div.querySelector(".outer-road-width-input"), div.querySelector(".outer-road-extension-input")]
+    .forEach((el) => {
+      el.addEventListener("input", refresh);
+      el.addEventListener("change", refresh);
+    });
+  refresh();
+}
+
+function updateOuterRoadNote() {
+  if (!outerRoadNoteEl) return;
+  const count = outerRoadRowsEl ? outerRoadRowsEl.querySelectorAll(".outer-road-row").length : 0;
+  outerRoadNoteEl.textContent = count
+    ? `${count} outer road(s) along the boundary.`
+    : `No outer roads yet - click "Add outer road" if a road runs along one of the boundary sides.`;
 }
 
 function addRoadRow() {
@@ -1828,6 +2378,21 @@ function pointToPathDistance(pt, path) {
 }
 
 function recomputeAllRoads() {
+  // Outer-road side lists are built from the boundary's own corner labels, so a change to the
+  // side count leaves them naming sides that no longer exist - rebuild them here, keeping each
+  // row's current pick where that side still exists.
+  if (outerRoadRowsEl && currentVertices) {
+    const n = currentVertices.length;
+    const labels = labelsFor(n);
+    const sideOptions = Array.from({ length: n }, (_, i) => ({
+      value: String(i), text: `${labels[i]}-${labels[(i + 1) % n]}`,
+    }));
+    outerRoadRowsEl.querySelectorAll(".outer-road-side-select").forEach((sel) => {
+      populateSelectOptions(sel, sideOptions);
+    });
+    updateOuterRoadNote();
+  }
+
   const rows = Array.from(roadRowsEl.children);
   rows.forEach((row) => {
     populateRoadEndpointSelect(row.querySelector(".road-start-select"), row, false);
@@ -1983,14 +2548,56 @@ function drawRoadLogicPreview(errors) {
   (roads || []).forEach((r) => {
     if (!r) return;
     const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
-    const midPoint = path[Math.floor(path.length / 2)];
-    const mid = transform(midPoint);
     const chordLength = Math.hypot(r.end.x - r.start.x, r.end.y - r.start.y);
     const bufferPart = r.buffer ? ` + ${feetToDisplay(r.buffer).toFixed(1)} ${unitLabel()} buffer/side` : "";
     const curvePart = r.shape === "curved" ? `, curved (${feetToDisplay(r.bulge).toFixed(1)} ${unitLabel()} bulge)` : "";
-    svg += `<text x="${mid.x.toFixed(1)}" y="${(mid.y - 8).toFixed(1)}" font-size="11" font-weight="700" ` +
-      `fill="#7d5ba6" text-anchor="middle">${r.name} (${feetToDisplay(chordLength).toFixed(1)} ${unitLabel()} long, ` +
-      `${feetToDisplay(r.width).toFixed(1)} ${unitLabel()} wide${bufferPart}${curvePart})</text>`;
+    const label = `${r.name} (${feetToDisplay(chordLength).toFixed(1)} ${unitLabel()} long, `
+      + `${feetToDisplay(r.width).toFixed(1)} ${unitLabel()} wide${bufferPart}${curvePart})`;
+
+    // Written ALONG the road and inside its own band, like a street name on a map, rather than
+    // as horizontal text floating above one end of it (where it collided with the boundary's own
+    // corner labels). Everything below is computed in SCREEN space: the transform scales and can
+    // flip, so a real-world angle would be wrong.
+    const screenPath = path.map(transform);
+    let total = 0;
+    for (let i = 0; i < screenPath.length - 1; i++) {
+      total += Math.hypot(screenPath[i + 1].x - screenPath[i].x, screenPath[i + 1].y - screenPath[i].y);
+    }
+    // The point at HALF the road's length, and the direction of the segment it falls on (so a
+    // curved road's label follows the arc there). The old code used path[floor(n/2)], which for
+    // a straight road's 2-point path is its END, not its middle - that's why the label sat up at
+    // the top of the band.
+    let remaining = total / 2;
+    let mid = screenPath[0];
+    let angle = 0;
+    for (let i = 0; i < screenPath.length - 1; i++) {
+      const dx = screenPath[i + 1].x - screenPath[i].x;
+      const dy = screenPath[i + 1].y - screenPath[i].y;
+      const segLen = Math.hypot(dx, dy) || 1;
+      if (remaining <= segLen || i === screenPath.length - 2) {
+        const t = Math.max(0, Math.min(1, remaining / segLen));
+        mid = { x: screenPath[i].x + dx * t, y: screenPath[i].y + dy * t };
+        angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+        break;
+      }
+      remaining -= segLen;
+    }
+    // Keep the text upright - a road drawn right-to-left would otherwise read upside down.
+    if (angle > 90) angle -= 180;
+    else if (angle < -90) angle += 180;
+
+    // Sized off the road's own length, as asked: a long road carries big text, a short one has
+    // to shrink or the label would run out past its own ends. Also capped by the band's
+    // thickness (0.55 char-width per em is the usual approximation for a bold sans face) so the
+    // text can never overflow the road sideways either.
+    const scale = chordLength > 1e-6 ? total / chordLength : 1;
+    const byLength = (total * 0.92) / Math.max(label.length * 0.55, 1);
+    const byWidth = r.width * scale * 0.62;
+    const fontSize = Math.max(4.5, Math.min(15, byLength, byWidth));
+
+    svg += `<text x="${mid.x.toFixed(1)}" y="${mid.y.toFixed(1)}" font-size="${fontSize.toFixed(1)}" ` +
+      `font-weight="700" fill="#3a2352" text-anchor="middle" dominant-baseline="central" ` +
+      `transform="rotate(${angle.toFixed(1)} ${mid.x.toFixed(1)} ${mid.y.toFixed(1)})">${label}</text>`;
   });
   roadLogicSvgEl.innerHTML = svg;
 
@@ -2000,7 +2607,7 @@ function drawRoadLogicPreview(errors) {
   } else {
     roadLogicNoteEl.textContent = roads && roads.length
       ? `${roads.length} road(s) defined.`
-      : "No roads yet - click \"Add road\" to start.";
+      : "No inner roads yet - click \"Add inner road\" to start.";
     roadLogicNoteEl.classList.remove("closure-error");
   }
 }
@@ -2009,6 +2616,16 @@ addRoadBtnEl.addEventListener("click", () => {
   addRoadRow();
   recomputeAllRoads();
 });
+
+if (addOuterRoadBtnEl) {
+  addOuterRoadBtnEl.addEventListener("click", () => {
+    if (!currentVertices) {
+      setMessage("Finish Metes & Bounds first - an outer road runs along one of the boundary's own sides.", "error");
+      return;
+    }
+    addOuterRoadRow();
+  });
+}
 
 // ---- Plot logic (master plan): sub-sections left after roads, then plots within each ----
 
@@ -2030,11 +2647,10 @@ function isEdgeRoadFacing(a, b) {
     const path = r.path && r.path.length >= 2 ? r.path : [r.start, r.end];
     if (pointToPathDistance(mid, path) <= r.width / 2 + (r.buffer || 0) + 0.5) return true;
   }
-  if (currentVertices && edgeRowsEl.children.length === currentVertices.length) {
-    const { roles } = readRoleSetback();
+  if (currentVertices) {
     const n = currentVertices.length;
-    for (let i = 0; i < n; i++) {
-      if (!isRoadRole(roles[i])) continue;
+    for (const i of outerRoadEdgeSet()) {
+      if (i >= n) continue;
       const pa = currentVertices[i], pb = currentVertices[(i + 1) % n];
       if (pointToSegmentDistance(mid, pa, pb) < 0.5) return true;
     }
@@ -2400,6 +3016,20 @@ function renderSubsectionDetails(sub) {
     `Used: ${sqFeetToDisplayArea(sub.details.usedArea).toFixed(1)} ${au} / Sub-section: ${sqFeetToDisplayArea(sub.details.subArea).toFixed(1)} ${au}`,
     `Open space: ${sqFeetToDisplayArea(sub.details.openArea || 0).toFixed(1)} ${au}`,
   ];
+  // A naive area/(length x width) ceiling - ignores road frontage, shape, gaps and the +/-
+  // range entirely, so it is always an OVER-estimate, never a target to hit. Its only job is
+  // to give a sense of scale next to the real, shape-aware result: a huge gap between the two
+  // is a hint the sub-section's frontage/shape (not a bug) is what's limiting it, worth
+  // revisiting the road layout for rather than the plot size inputs.
+  const tLen = sub.params && sub.params.targetLength, tWid = sub.params && sub.params.targetWidth;
+  if (tLen > 0 && tWid > 0) {
+    const approxMax = Math.floor(sub.details.subArea / (tLen * tWid));
+    const actualCount = sub.details.frontageCount + sub.details.fillCount;
+    lines.push(
+      `Area-only estimate: up to ~${approxMax} plot(s) could fit by area alone (ignores road ` +
+      `frontage/shape) - ${actualCount} actually placed.`
+    );
+  }
   if (sub.details.biggestLabel) {
     lines.push(`Biggest: ${sub.details.biggestLabel} (${sqFeetToDisplayArea(sub.details.biggestArea).toFixed(1)} ${au})`);
     lines.push(`Smallest: ${sub.details.smallestLabel} (${sqFeetToDisplayArea(sub.details.smallestArea).toFixed(1)} ${au})`);
@@ -2459,6 +3089,11 @@ function buildSubsectionRow(sub) {
       minGap: displayToFeet(parseFloat(div.querySelector(".sub-min-gap").value) || 0),
       roadThreshold: displayToFeet(parseFloat(div.querySelector(".sub-road-threshold").value) || 0),
       maxPlots: null,
+      // Kept only so renderSubsectionDetails() can show a naive area/(length*width) capacity
+      // estimate next to the real result - not sent to the server, which only ever wanted the
+      // min/max range above.
+      targetLength: length,
+      targetWidth: width,
     };
   };
 
@@ -2707,6 +3342,127 @@ addPlotBtnEl.addEventListener("click", async () => {
   if (plotEditSession) drawPlotEditorPreview();
 });
 
+function findAnyPlotByName(name) {
+  const target = name.trim().toUpperCase();
+  if (!target) return null;
+  for (let si = 0; si < subsections.length; si++) {
+    const plots = subsections[si].plots || [];
+    for (let pi = 0; pi < plots.length; pi++) {
+      const p = plots[pi];
+      if (p.name && p.name.toUpperCase() === target) return { subIndex: si, plotIndex: pi, plot: p };
+    }
+  }
+  return null;
+}
+
+// "Combine plots": merge two or more touching plots into ONE real plot, whatever shape that
+// union turns out to be. Real and fill plots can be mixed - combining a fill piece into a real
+// plot is how a plot absorbs the leftover land beside it, which the area stepper can't do when
+// that land isn't reachable by pushing a single edge in a straight line.
+combinePlotsBtnEl.addEventListener("click", async () => {
+  const rawA = combinePlotAInputEl.value.trim();
+  const rawB = combinePlotBInputEl.value.trim();
+
+  const fail = (msg) => {
+    combinePlotsNoteEl.textContent = msg;
+    combinePlotsNoteEl.classList.add("closure-error");
+  };
+
+  if (!rawA || !rawB) {
+    fail("Fill in both boxes - name one plot in each, e.g. S1P1 and S1F1.");
+    return;
+  }
+  const names = [...new Set([rawA, rawB].map((n) => n.toUpperCase()))];
+  if (names.length < 2) {
+    fail("Those are the same plot - name two different ones.");
+    return;
+  }
+
+  const found = names.map((n) => ({ name: n, hit: findAnyPlotByName(n) }));
+  const missing = found.filter((f) => !f.hit).map((f) => f.name);
+  if (missing.length) {
+    fail(`No plot found for: ${missing.join(", ")}.`);
+    return;
+  }
+  // A plot is one piece of land inside one sub-section - two plots separated by a road are not
+  // combinable at all, so say that plainly rather than letting the server infer it from names.
+  const subIndexes = [...new Set(found.map((f) => f.hit.subIndex))];
+  if (subIndexes.length > 1) {
+    fail(`Those plots are in different sub-sections (${subIndexes.map((i) => `S${i + 1}`).join(", ")}) - `
+       + `a plot can't span a road, so they can't be combined.`);
+    return;
+  }
+
+  const sub = subsections[subIndexes[0]];
+  combinePlotsNoteEl.textContent = "Combining...";
+  combinePlotsNoteEl.classList.remove("closure-error");
+
+  let data;
+  try {
+    const res = await fetch("/combine-plots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subsection: { vertices: sub.vertices },
+        plots: (sub.plots || []).map((pl) => ({ name: pl.name, fill: !!pl.fill, vertices: pl.vertices })),
+        names,
+        params: subsectionParams(sub),
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    fail(`Network/parse error: ${err}`);
+    return;
+  }
+  if (!data.success) {
+    fail(data.error || "That combine was refused.");
+    return;
+  }
+
+  // The merged plot takes the earliest position of the plots it replaces, so the sub-section's
+  // chronological P-numbering (applied by nameSubsectionPlots from array order) stays stable
+  // instead of the combined plot jumping to the end of the list.
+  const mergedIndexes = found.map((f) => f.hit.plotIndex).sort((a, b) => a - b);
+  const insertAt = mergedIndexes[0];
+  const doomed = new Set(mergedIndexes);
+  const kept = (sub.plots || []).filter((_pl, i) => !doomed.has(i));
+  const before = (sub.plots || []).filter((_pl, i) => !doomed.has(i) && i < insertAt).length;
+  data.plot.fill = false;
+  kept.splice(before, 0, data.plot);
+  sub.plots = kept;
+
+  // An in-progress edit anywhere in this sub-section has to go: the plot array was just
+  // re-indexed and renamed underneath it, so the session's subIndex/plotIndex (and its working
+  // vertices) can no longer be trusted to point at the plot the user thinks they're editing.
+  if (plotEditSession && plotEditSession.subIndex === subIndexes[0]) {
+    plotEditSession = null;
+    plotEditFieldsEl.style.display = "none";
+    plotNameInputEl.value = "";
+    plotNameNoteEl.textContent = "";
+    plotNameNoteEl.classList.remove("closure-error");
+    plotAreaStepNoteEl.textContent = "";
+    plotAreaStepNoteEl.classList.remove("closure-error");
+  }
+
+  applyRegeneratedFill(sub, data.fill, data.openSpace);
+  renderSubsectionDetails(sub);
+
+  const mergedName = (sub.plots[before] || {}).name || "the combined plot";
+  // A land-balance/geometry note is reported, never treated as a failure: the merge is done and
+  // committed by this point, and these numbers are usually a sub-square-foot drift the
+  // sub-section was already carrying before the combine touched it.
+  const notes = data.invariantErrors || [];
+  combinePlotsNoteEl.textContent =
+    `Combined ${names.join(" + ")} into ${mergedName} (${sqFeetToDisplayArea(data.plot.area).toFixed(1)} ${areaUnitLabel()}, ${data.plot.sides} sides).`
+    + (notes.length ? ` Geometry note: ${notes[0]}` : "");
+  combinePlotsNoteEl.classList.remove("closure-error");
+  combinePlotAInputEl.value = "";
+  combinePlotBInputEl.value = "";
+
+  drawPlotLogicPreview();
+  drawPlotEditorPreview();
+});
+
 function findRealPlotByName(name) {
   const target = name.trim().toUpperCase();
   if (!target) return null;
@@ -2741,7 +3497,9 @@ function plotDiagonalSeedLength(fromIndex, toIndex) {
   return displayToFeet(20);
 }
 
-function addPlotDiagonalRow(defaultFrom, defaultTo) {
+function addPlotDiagonalRow(defaultFrom, defaultTo, removable) {
+  // Same "required vs. over-specified" distinction as the site plot's own addDiagonalRow -
+  // only a diagonal added on top of the N-3 that are actually needed gets a Remove button.
   const n = plotEditSession.workingVertices.length;
   const labels = labelsFor(n).map((l) => `${l}'`);
   const tr = document.createElement("tr");
@@ -2780,16 +3538,85 @@ function addPlotDiagonalRow(defaultFrom, defaultTo) {
   fromSelect.addEventListener("change", () => {
     populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, parseInt(fromSelect.value, 10)));
     reseed();
+    rebuildPlotCornerPlacementRows();
     onPlotFieldChanged();
   });
   toSelect.addEventListener("change", () => {
     reseed();
+    rebuildPlotCornerPlacementRows();
     onPlotFieldChanged();
   });
   input.addEventListener("input", onPlotFieldChanged);
   input.addEventListener("change", onPlotFieldChanged);
 
+  const removeTd = document.createElement("td");
+  if (removable) {
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "secondary diagonal-remove-btn";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      tr.remove();
+      rebuildPlotCornerPlacementRows();
+      onPlotFieldChanged();
+    });
+    removeTd.appendChild(removeBtn);
+  }
+  tr.appendChild(removeTd);
+
   plotDiagonalRowsEl.appendChild(tr);
+}
+
+// Same purpose and logic as rebuildCornerPlacementRows() for the site/master boundary, applied
+// to whichever plot is currently loaded in the editor - separate DOM, separate `plotCornerChoices`
+// map, since a plot's corners (A'..) are a different label space from the boundary's (A..).
+function rebuildPlotCornerPlacementRows() {
+  if (!plotEditSession) return;
+  const n = plotEditSession.workingVertices.length;
+  const diagonalSpecs = readPlotDiagonalSpecs();
+  const freeInfo = computeFreeCorners(n, diagonalSpecs);
+  const tick = "′"; // the plot editor labels its own corners A′, B′, ... (never plain A, B)
+
+  const stillFree = new Set(freeInfo.map((info) => info.label));
+  Object.keys(plotCornerChoices).forEach((label) => { if (!stillFree.has(label)) delete plotCornerChoices[label]; });
+
+  plotCornerPlacementRowsEl.innerHTML = "";
+  if (!freeInfo.length) {
+    plotCornerPlacementTableEl.style.display = "none";
+    plotCornerPlacementNoteEl.textContent =
+      "No ambiguous corners with the current diagonals - each one is fully pinned by its own two reference distances.";
+    return;
+  }
+  plotCornerPlacementNoteEl.textContent =
+    "Distance alone can't say which side of two reference corners a corner actually sits on - " +
+    "leave \"Auto\" to let the shape decide (it avoids a self-crossing result automatically, " +
+    "and warns when it had to guess), or set one directly if you know which side is right.";
+  plotCornerPlacementTableEl.style.display = "table";
+
+  freeInfo.forEach(({ label, i1Label, i2Label }) => {
+    const tr = document.createElement("tr");
+    // Same single-cell phrasing as the Metes & Bounds list above.
+    const cornerTd = document.createElement("td");
+    cornerTd.className = "corner-ref-cell";
+    cornerTd.textContent = `${label}${tick} with respect to ${i1Label}${tick}${i2Label}${tick}`;
+    tr.appendChild(cornerTd);
+    const selectTd = document.createElement("td");
+    const select = document.createElement("select");
+    select.className = "plot-corner-bulge-select";
+    select.innerHTML =
+      `<option value="auto">Auto</option>` +
+      `<option value="left">Left of ${i1Label}${tick}→${i2Label}${tick}</option>` +
+      `<option value="right">Right of ${i1Label}${tick}→${i2Label}${tick}</option>`;
+    select.value = plotCornerChoices[label] || "auto";
+    select.addEventListener("change", () => {
+      if (select.value === "auto") delete plotCornerChoices[label];
+      else plotCornerChoices[label] = select.value;
+      onPlotFieldChanged();
+    });
+    selectTd.appendChild(select);
+    tr.appendChild(selectTd);
+    plotCornerPlacementRowsEl.appendChild(tr);
+  });
 }
 
 function readPlotLengths() {
@@ -2857,6 +3684,7 @@ function buildPlotEditFields() {
       addPlotDiagonalRow(0, k);
     }
   }
+  rebuildPlotCornerPlacementRows();
 
   updatePlotAreaNote();
   plotAreaStepNoteEl.textContent = "";
@@ -2889,7 +3717,7 @@ function recomputeWorkingVertices() {
   const session = plotEditSession;
   const lengths = readPlotLengths();
   const diagonalSpecs = readPlotDiagonalSpecs();
-  const result = solveFromDiagonalGraph(lengths, diagonalSpecs);
+  const result = solveFromDiagonalGraph(lengths, diagonalSpecs, plotCornerChoices);
   if (!result.ok) {
     plotNameNoteEl.textContent = result.error;
     plotNameNoteEl.classList.add("closure-error");
@@ -2932,7 +3760,9 @@ function recomputeWorkingVertices() {
   }
 
   session.workingVertices = newVerts;
-  plotNameNoteEl.textContent = `Editing ${session.name}.`;
+  plotNameNoteEl.textContent = result.autoFixedCrossing
+    ? `Editing ${session.name}. (Guessed corner placement for ${(result.autoFixedLabels || []).map((l) => l + "′").join(", ") || "an ambiguous corner"} to avoid a self-crossing shape - check Corner placement below if this doesn't look right.)`
+    : `Editing ${session.name}.`;
   plotNameNoteEl.classList.remove("closure-error");
   return true;
 }
@@ -3064,7 +3894,14 @@ async function stepPlotArea(direction) {
     // The server names the constraint that actually stopped the push (a neighbouring plot, the
     // sub-section boundary, a side-count change, or a minimum dimension) rather than blaming
     // fill triangles, which no longer constrain anything at all.
-    plotAreaStepNoteEl.textContent = data.error || "That resize was refused.";
+    // A blocked GROW is also where the stepper's own design runs out: it slides one edge with the
+    // side count fixed, so free land that isn't square-on to an edge is unreachable by it. Point
+    // at the tool that can reach it rather than leaving a dead end.
+    plotAreaStepNoteEl.textContent = (data.error || "That resize was refused.")
+      + (direction === "grow"
+          ? ` If there is still free land beside it, pick that side in "Push edge" above and use `
+            + `"Expand to boundary" - it sweeps that side out and absorbs the land whatever shape it is.`
+          : "");
     plotAreaStepNoteEl.classList.add("closure-error");
     return;
   }
@@ -3086,8 +3923,93 @@ async function stepPlotArea(direction) {
   drawPlotEditorPreview();
 }
 
+// "Expand to boundary": the escalation from the area stepper. Sweeps ONE chosen side straight
+// outward and absorbs the free land it crosses, out to the sub-section edge / a road / the next
+// plot - so unlike the stepper it can take land of any shape and the side count changes to match.
+// A side must be chosen explicitly: with "Auto" the sweep direction would be a guess, and this
+// takes far more land per click than a 2 ft push.
+async function expandPlotToBoundary() {
+  const session = plotEditSession;
+  if (!session) return;
+  if (session.pushEdgeIndex === null || session.pushEdgeIndex === undefined) {
+    expandPlotNoteEl.textContent =
+      `Choose which side to expand in "Push edge" above first - "Auto" doesn't say which way to sweep.`;
+    expandPlotNoteEl.classList.add("closure-error");
+    return;
+  }
+  const sub = subsections[session.subIndex];
+  expandPlotNoteEl.textContent = "Expanding...";
+  expandPlotNoteEl.classList.remove("closure-error");
+
+  let data;
+  try {
+    const res = await fetch("/expand-plot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subsection: { vertices: sub.vertices },
+        roadFacingEdges: plotEditRoadFacingEdges(),
+        plots: (sub.plots || []).map((pl, pi) => ({
+          name: pl.name,
+          fill: !!pl.fill,
+          vertices: pi === session.plotIndex ? session.workingVertices : pl.vertices,
+        })),
+        plotName: session.name,
+        edgeIndex: session.pushEdgeIndex,
+        params: subsectionParams(sub),
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    expandPlotNoteEl.textContent = `Network/parse error: ${err}`;
+    expandPlotNoteEl.classList.add("closure-error");
+    return;
+  }
+  if (!data.success) {
+    expandPlotNoteEl.textContent = data.error || "That expansion was refused.";
+    expandPlotNoteEl.classList.add("closure-error");
+    return;
+  }
+
+  // Same pending-edit contract as the stepper: live until "Save plot", undone by "Reset plot".
+  const before = session.workingVertices.length;
+  session.workingVertices = data.plot.vertices.map((v) => ({ x: v.x, y: v.y }));
+  session.lastEdgePushed = null;
+  session.pendingFill = data.fill;
+  session.pendingOpenSpace = data.openSpace;
+
+  // The side count changed, so everything derived from the vertex list is stale and has to be
+  // rebuilt from the new shape - not just the edge/diagonal tables and corner-placement rows,
+  // but the anchor (taken from vertices 0 and 1), which edges now count as road frontage, and
+  // the chosen push edge, whose old index points at a different side of a different polygon.
+  const verts = session.workingVertices;
+  session.anchorPos = { x: verts[0].x, y: verts[0].y };
+  session.anchorHeadingRad = Math.atan2(verts[1].y - verts[0].y, verts[1].x - verts[0].x);
+  session.frontageEdges = plotFrontageEdgeIndices(verts, sub);
+  session.pushEdgeIndex = null;
+  plotCornerChoices = {};
+  buildPlotEditFields();
+  syncPlotFieldValuesFromWorkingVertices();
+  buildPushEdgeOptions();
+  updatePlotAreaNote();
+  plotNameNoteEl.textContent = `Editing ${session.name} (${verts.length} sides).`;
+  plotNameNoteEl.classList.remove("closure-error");
+
+  const notes = data.invariantErrors || [];
+  expandPlotNoteEl.textContent =
+    `Absorbed ${sqFeetToDisplayArea(data.absorbedArea).toFixed(1)} ${areaUnitLabel()} of free land`
+    + (data.pocketCount ? ` (including ${data.pocketCount} pocket(s) it would otherwise have sealed off)` : "")
+    + `; ${before} -> ${session.workingVertices.length} sides. Click "Save plot" to keep it.`
+    + (notes.length ? ` Geometry note: ${notes[0]}` : "");
+  expandPlotNoteEl.classList.remove("closure-error");
+  plotAreaStepNoteEl.textContent = "";
+  plotAreaStepNoteEl.classList.remove("closure-error");
+  drawPlotEditorPreview();
+}
+
 plotAreaPlusBtnEl.addEventListener("click", () => stepPlotArea("grow"));
 plotAreaMinusBtnEl.addEventListener("click", () => stepPlotArea("shrink"));
+if (expandPlotBtnEl) expandPlotBtnEl.addEventListener("click", expandPlotToBoundary);
 if (pushEdgeSelectEl) {
   pushEdgeSelectEl.addEventListener("change", () => {
     if (!plotEditSession) return;
@@ -3120,6 +4042,7 @@ function loadPlotForEditing(name) {
     return;
   }
   const { subIndex, plotIndex, plot } = found;
+  plotCornerChoices = {}; // a different plot (or the same one reloaded) means different corners
   const originalVertices = plot.vertices.map((v) => ({ x: v.x, y: v.y }));
   const dx = originalVertices[1].x - originalVertices[0].x;
   const dy = originalVertices[1].y - originalVertices[0].y;
@@ -3176,7 +4099,10 @@ function drawPlotEditorPreview() {
       } else if (isFill) {
         svg += `<polygon points="${pts}" fill="rgba(200,120,40,0.10)" stroke="#c87828" stroke-width="1" stroke-dasharray="3,3" />`;
       } else {
-        svg += `<polygon points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
+        // .plot-hit marks this polygon as clickable - it is a real plot, so the SVG click
+        // handler will load it for editing. Fill plots and open space deliberately don't get it,
+        // since clicking those only ever produces a "not editable" message.
+        svg += `<polygon class="plot-hit" points="${pts}" fill="rgba(47,111,79,0.12)" stroke="#2f6f4f" stroke-width="1.2" />`;
       }
       if (!isFill || plot.area >= 60 || isEdited) {
         const pcen = centroidOf(verts);
@@ -3214,13 +4140,25 @@ function drawPlotEditorPreview() {
 // corner is nudged slightly toward the sub-section's centroid before testing, same reasoning
 // as elsewhere in this app: ray-casting containment is unreliable for a point sitting exactly
 // on a boundary edge, which a plot's own corner very often does by construction.
+// A plot corner is acceptable when it is inside the sub-section, or sitting on its boundary
+// within `tol` - which is exactly where "Expand to boundary" is supposed to put corners.
+//
+// This used to nudge each corner 0.05 ft TOWARDS the sub-section's centroid and require the
+// nudged point to be inside. That only holds for a convex sub-section: on a concave one - which
+// is most of them once roads cut the block up - the direction from a corner sitting in a notch
+// to the overall centroid can leave the polygon immediately, so a perfectly legal corner tested
+// as "outside". Measuring distance to the boundary instead is direction-free and behaves the
+// same way on concave and convex shapes. The server still does the authoritative containment
+// check (an area difference against the real polygon); this is only the inline safety net.
 function plotStaysInsideSubsection(verts, subVertices) {
-  const centroid = centroidOf(subVertices);
+  const tol = 0.05;
+  const n = subVertices.length;
   return verts.every((v) => {
-    const dx = centroid.x - v.x, dy = centroid.y - v.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const nudged = { x: v.x + (dx / len) * 0.05, y: v.y + (dy / len) * 0.05 };
-    return pointInPolygon(nudged, subVertices);
+    if (pointInPolygon(v, subVertices)) return true;
+    for (let i = 0; i < n; i++) {
+      if (distancePointToSegment(v, subVertices[i], subVertices[(i + 1) % n]) <= tol) return true;
+    }
+    return false;
   });
 }
 
@@ -3275,23 +4213,33 @@ function pointStrictlyInsidePolygon(pt, poly, tol) {
 // boundary is normal adjacency, but one plot's edge actually cutting into another's interior
 // means the edit went further than it should have, even if each shape checked out on its own.
 function polygonsOverlap(polyA, polyB) {
-  const nA = polyA.length, nB = polyB.length;
   const tol = 0.1;
-  for (let i = 0; i < nA; i++) {
-    const a1 = polyA[i], a2 = polyA[(i + 1) % nA];
-    for (let j = 0; j < nB; j++) {
-      const b1 = polyB[j], b2 = polyB[(j + 1) % nB];
-      if (properSegmentsIntersect(a1, a2, b1, b2)) return true;
+  // Measured purely as DEPTH of penetration, sampled along both boundaries. The obvious test -
+  // "do any two edges properly cross?" - cannot be used here, because it has no tolerance: two
+  // plots that legitimately share a boundary wobble across it by a few thousandths of a foot
+  // once both have been snapped onto the coordinate grid, and every one of those micro-crossings
+  // is a genuine proper intersection. That made adjacency itself read as overlap (measured case:
+  // a 62 ft shared edge, 0.0176 sqft of "overlap" at 0.0009 ft deep - one hundredth of an inch -
+  // blocking a save the server had already checked and passed). Sampling depth instead ignores
+  // anything shallower than `tol` while still catching a plot genuinely cutting into another,
+  // and it needs no polygon-clipping in JS. properSegmentsIntersect is still the right tool for
+  // the self-intersection check, where a crossing is a crossing at any scale.
+  const SAMPLES_PER_EDGE = 16;
+  const boundarySamples = (poly) => {
+    const pts = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      for (let s = 0; s < SAMPLES_PER_EDGE; s++) {
+        const t = s / SAMPLES_PER_EDGE;
+        pts.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      }
     }
-  }
-  const midpoints = (poly) => poly.map((v, i) => {
-    const w = poly[(i + 1) % poly.length];
-    return { x: (v.x + w.x) / 2, y: (v.y + w.y) / 2 };
-  });
-  for (const p of polyA.concat(midpoints(polyA))) {
+    return pts;
+  };
+  for (const p of boundarySamples(polyA)) {
     if (pointStrictlyInsidePolygon(p, polyB, tol)) return true;
   }
-  for (const p of polyB.concat(midpoints(polyB))) {
+  for (const p of boundarySamples(polyB)) {
     if (pointStrictlyInsidePolygon(p, polyA, tol)) return true;
   }
   return false;
@@ -3314,7 +4262,8 @@ plotNameInputEl.addEventListener("input", () => {
 });
 
 addPlotDiagonalBtnEl.addEventListener("click", () => {
-  addPlotDiagonalRow(0, null);
+  addPlotDiagonalRow(0, null, true);
+  rebuildPlotCornerPlacementRows();
   onPlotFieldChanged();
 });
 
@@ -3518,22 +4467,40 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
   // synthesises at the end of that gesture. (Latching on `dragMoved` alone instead would stay
   // armed forever after the first pan and silently eat every later selection click.)
   let dragging = false, dragStartX = 0, dragStartY = 0, dragMoved = false;
+  let pressX = 0, pressY = 0;
   let suppressNextClick = false;
+  const DRAG_THRESHOLD_PX = 3;   // below this the gesture is a click, not a pan
   zoomViewportEl.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0 || zoomControlsEl.contains(ev.target)) return;
     if (zoomViewportEl.classList.contains("no-zoom")) return;   // e.g. the sheet-preview iframe
     dragging = true;
     dragMoved = false;
-    dragStartX = ev.clientX - panX;
-    dragStartY = ev.clientY - panY;
-    zoomViewportEl.setPointerCapture(ev.pointerId);
-    zoomViewportEl.classList.add("panning");
+    pressX = ev.clientX;
+    pressY = ev.clientY;
+    // Pointer capture is deliberately NOT taken here. While an element holds pointer capture the
+    // browser retargets the whole gesture to it - including the `click` it synthesises at the
+    // end - so capturing on every press meant a plain click on the drawing was delivered to this
+    // viewport and never reached the plot polygon underneath. That is what made click-to-select
+    // in the Plot Editor do nothing at all. Capture is taken below instead, only once the
+    // gesture has actually become a pan.
   });
   zoomViewportEl.addEventListener("pointermove", (ev) => {
     if (!dragging) return;
-    const nx = ev.clientX - dragStartX, ny = ev.clientY - dragStartY;
-    if (Math.abs(nx - panX) > 2 || Math.abs(ny - panY) > 2) dragMoved = true;
-    panX = nx; panY = ny;
+    if (!dragMoved) {
+      // Measured from where the press STARTED. The old test compared against the previous
+      // move's position, so a slow drag could travel any distance without ever tripping it,
+      // while a fast flick tripped it immediately.
+      if (Math.abs(ev.clientX - pressX) <= DRAG_THRESHOLD_PX
+          && Math.abs(ev.clientY - pressY) <= DRAG_THRESHOLD_PX) return;
+      dragMoved = true;
+      // Re-anchor at the moment panning begins so the drawing doesn't jump by the threshold.
+      dragStartX = ev.clientX - panX;
+      dragStartY = ev.clientY - panY;
+      try { zoomViewportEl.setPointerCapture(ev.pointerId); } catch (e) { /* not capturable */ }
+      zoomViewportEl.classList.add("panning");
+    }
+    panX = ev.clientX - dragStartX;
+    panY = ev.clientY - dragStartY;
     applyZoom();
   });
   const endDrag = (ev) => {
@@ -3858,11 +4825,63 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
 
   $("homeBtn").addEventListener("click", () => showHome());
 
+  // TEMPORARY, for easy testing of the self-intersection auto-fix in solveFromDiagonalGraph
+  // (see the "Corner-flipping self-intersection fix" note in uttam-6/CLAUDE.md) - pre-fills
+  // Metes & Bounds with the exact real 12-gon that exposed the bug (a diagonal graph the old
+  // heuristic resolved to a self-crossing shape) instead of the default 4-sided square, so the
+  // fix is visible on page load with no manual data entry. Safe to delete this whole function
+  // and its one call site below once the fix has been exercised enough to trust; it changes
+  // nothing about the solver itself.
+  function seedDiagonalGraphTestCase() {
+    const testLengths = [140, 61, 50, 88, 75, 87, 68, 67, 42, 54, 46, 84]; // A-B, B-C, ..., L-A
+    const testDiagonals = [
+      ["L", "B", 184], ["L", "C", 200], ["L", "D", 214], ["L", "E", 154],
+      ["E", "K", 128], ["E", "J", 144], ["E", "I", 130],
+      ["I", "F", 165], ["F", "H", 140],
+    ];
+    const n = testLengths.length;
+    const idxOf = (letter) => letter.charCodeAt(0) - 65;
+    const labels = labelsFor(n);
+
+    sidesCountEl.value = n;
+    buildEdgeRows(); // n-sided rows + the (n-3) required diagonal rows, fan-from-A default
+
+    regularToggleEl.checked = false;
+    regularToggleEl.dispatchEvent(new Event("change"));
+
+    Array.from(edgeRowsEl.querySelectorAll("tr")).forEach((tr, i) => {
+      tr.querySelector(".length-input").value = feetToDisplay(testLengths[i]).toFixed(2);
+    });
+
+    // Overwrite the default fan-from-A diagonals with this specific graph (measured between
+    // whichever corners were actually convenient on site) - same count (n-3=9), just different
+    // endpoints, so no rows need adding or removing.
+    Array.from(diagonalRowsEl.querySelectorAll("tr")).forEach((tr, i) => {
+      const [fromLabel, toLabel, length] = testDiagonals[i];
+      const fromIdx = idxOf(fromLabel), toIdx = idxOf(toLabel);
+      const fromSelect = tr.querySelector(".diagonal-from-select");
+      const toSelect = tr.querySelector(".diagonal-to-select");
+      fromSelect.value = String(fromIdx);
+      populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, fromIdx));
+      toSelect.value = String(toIdx);
+      tr.querySelector(".diagonal-input").value = feetToDisplay(length).toFixed(2);
+    });
+
+    rebuildCornerPlacementRows(); // the diagonal endpoints above were set directly, without a
+                                  // "change" event - the Corner placement list otherwise still
+                                  // reflects buildEdgeRows()'s original fan-from-A default
+    resolveAndRedraw();
+  }
+
   // ---- Boot this instance ------------------------------------------------------------
   buildTabs();
   updateUnitLabels();
+  updateMirrorBtn();
   buildEdgeRows();
   goToStep(stepOrder[0]);
+  seedDiagonalGraphTestCase(); // TEMPORARY - see comment above; must run AFTER goToStep, which
+                                // clears the message area on every navigation (including this
+                                // first one) and would otherwise wipe the warning this sets.
 
   return {
     root,

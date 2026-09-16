@@ -1,5 +1,5 @@
 """
-app.py (uttam-site-planner)
+app.py (uttam-6)
 
 Guided-wizard planner app. Phase 1 (this build): pages 1-4 - project/legal info, an
 arbitrary-shape site plot (metes-and-bounds: side lengths + interior angles, any convex or
@@ -16,15 +16,17 @@ PLOT/SETBACK/FOOTPRINT drawing branches added to json_to_dxf.py / pdf_render.py.
     /compute-footprint  - metes-and-bounds footprint -> resolved footprint + containment check
     /resize-plot        - grow/shrink one real plot by an edge push + regenerated fill
     /regenerate-fill    - rebuild a sub-section's fill/open space from its real plots
+    /combine-plots      - merge two or more of a sub-section's plots into one real plot
+    /expand-plot        - sweep one of a plot's sides outward, absorbing the free land it crosses
     /generate-plan      - (not yet wired - lands with the page-4 LLM generation stage)
     /generate-pdf       - layout.json -> PDF, same contract as uttam-4
     /generate-pdf-from-dxf - live-edited-viewer DXF -> PDF, same contract as uttam-4
 
-Own process, own port (8006), own artifact folders. Run:
+Own process, own port (8007), own artifact folders. Run:
 
-    cd uttam-site-planner
+    cd uttam-6
     python app.py
-    -> http://127.0.0.1:8006/
+    -> http://127.0.0.1:8007/
 """
 
 import json
@@ -45,8 +47,10 @@ from layout_geometry import LayoutError, floor_label, floor_offsets
 from site_geometry import (
     SiteGeometryError,
     bounding_rect_hint,
+    combine_plots,
     compute_subsections,
     containment_violations,
+    expand_plot_to_boundary,
     insert_plots,
     offset_polygon_edges,
     polygon_contains,
@@ -434,6 +438,90 @@ async def regenerate_fill_endpoint(request: Request):
                 "detail": traceback.format_exc()}
 
 
+@app.post("/expand-plot")
+async def expand_plot_endpoint(request: Request):
+    """Sweep one of a plot's own sides outward and absorb the free land it crosses, out to the
+    sub-section boundary / a road / the next plot. The escalation from /resize-plot's fixed-side-
+    count edge push. `body` needs 'subsection', 'roadFacingEdges', 'plots', 'plotName',
+    'edgeIndex' and 'params'."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        sub = body.get("subsection")
+        sub_vertices = sub.get("vertices") if isinstance(sub, dict) else None
+        if not isinstance(sub_vertices, list) or len(sub_vertices) < 3:
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected 'subsection': {vertices: [...]}."}
+
+        plot_name = body.get("plotName")
+        if not plot_name:
+            return {"success": False, "stage": "site_geometry", "error": "Expected 'plotName'."}
+
+        edge_index = body.get("edgeIndex")
+        if not isinstance(edge_index, int):
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Pick which side to expand - 'edgeIndex' must be a number."}
+
+        try:
+            result = expand_plot_to_boundary(sub_vertices, body.get("roadFacingEdges") or [],
+                                             body.get("plots") or [], plot_name, edge_index,
+                                             body.get("params") or {})
+        except SiteGeometryError as exc:
+            return {"success": False, "stage": "site_geometry", "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry",
+                    "error": f"Expand failed: {exc}", "detail": traceback.format_exc()}
+
+        if result.get("error"):
+            return {"success": False, "stage": "site_geometry", **result}
+        return {"success": True, **result}
+
+    except Exception as exc:
+        return {"success": False, "stage": "pipeline", "error": f"Unexpected error: {exc}",
+                "detail": traceback.format_exc()}
+
+
+@app.post("/combine-plots")
+async def combine_plots_endpoint(request: Request):
+    """Merge two or more of one sub-section's plots (real and/or fill, any shape) into a single
+    real plot, then rebuild that sub-section's fill/open space around the result.
+    `body` needs 'subsection': {vertices:[...]}, 'plots': [...], 'names': [...], and 'params'."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return {"success": False, "error": "Invalid request. Expected a JSON object."}
+
+        sub = body.get("subsection")
+        sub_vertices = sub.get("vertices") if isinstance(sub, dict) else None
+        if not isinstance(sub_vertices, list) or len(sub_vertices) < 3:
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected 'subsection': {vertices: [...]}."}
+
+        names = body.get("names")
+        if not isinstance(names, list) or len(names) < 2:
+            return {"success": False, "stage": "site_geometry",
+                    "error": "Expected 'names': a list of at least two plot names."}
+
+        try:
+            result = combine_plots(sub_vertices, body.get("plots") or [], names,
+                                   body.get("params") or {})
+        except SiteGeometryError as exc:
+            return {"success": False, "stage": "site_geometry", "error": str(exc)}
+        except Exception as exc:
+            return {"success": False, "stage": "site_geometry",
+                    "error": f"Combine failed: {exc}", "detail": traceback.format_exc()}
+
+        if result.get("error"):
+            return {"success": False, "stage": "site_geometry", **result}
+        return {"success": True, **result}
+
+    except Exception as exc:
+        return {"success": False, "stage": "pipeline", "error": f"Unexpected error: {exc}",
+                "detail": traceback.format_exc()}
+
+
 @app.post("/generate-pdf")
 async def generate_pdf(request: Request):
     """layout.json -> pdf_render.generate() -> PDF (one page per floor). Same contract as
@@ -618,4 +706,4 @@ app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="127.0.0.1", port=8006, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8007, reload=True)
