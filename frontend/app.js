@@ -4825,63 +4825,12 @@ finalizeMasterPlanBtn.addEventListener("click", () => {
 
   $("homeBtn").addEventListener("click", () => showHome());
 
-  // TEMPORARY, for easy testing of the self-intersection auto-fix in solveFromDiagonalGraph
-  // (see the "Corner-flipping self-intersection fix" note in uttam-6/CLAUDE.md) - pre-fills
-  // Metes & Bounds with the exact real 12-gon that exposed the bug (a diagonal graph the old
-  // heuristic resolved to a self-crossing shape) instead of the default 4-sided square, so the
-  // fix is visible on page load with no manual data entry. Safe to delete this whole function
-  // and its one call site below once the fix has been exercised enough to trust; it changes
-  // nothing about the solver itself.
-  function seedDiagonalGraphTestCase() {
-    const testLengths = [140, 61, 50, 88, 75, 87, 68, 67, 42, 54, 46, 84]; // A-B, B-C, ..., L-A
-    const testDiagonals = [
-      ["L", "B", 184], ["L", "C", 200], ["L", "D", 214], ["L", "E", 154],
-      ["E", "K", 128], ["E", "J", 144], ["E", "I", 130],
-      ["I", "F", 165], ["F", "H", 140],
-    ];
-    const n = testLengths.length;
-    const idxOf = (letter) => letter.charCodeAt(0) - 65;
-    const labels = labelsFor(n);
-
-    sidesCountEl.value = n;
-    buildEdgeRows(); // n-sided rows + the (n-3) required diagonal rows, fan-from-A default
-
-    regularToggleEl.checked = false;
-    regularToggleEl.dispatchEvent(new Event("change"));
-
-    Array.from(edgeRowsEl.querySelectorAll("tr")).forEach((tr, i) => {
-      tr.querySelector(".length-input").value = feetToDisplay(testLengths[i]).toFixed(2);
-    });
-
-    // Overwrite the default fan-from-A diagonals with this specific graph (measured between
-    // whichever corners were actually convenient on site) - same count (n-3=9), just different
-    // endpoints, so no rows need adding or removing.
-    Array.from(diagonalRowsEl.querySelectorAll("tr")).forEach((tr, i) => {
-      const [fromLabel, toLabel, length] = testDiagonals[i];
-      const fromIdx = idxOf(fromLabel), toIdx = idxOf(toLabel);
-      const fromSelect = tr.querySelector(".diagonal-from-select");
-      const toSelect = tr.querySelector(".diagonal-to-select");
-      fromSelect.value = String(fromIdx);
-      populateDiagonalSelect(toSelect, n, labels, validDiagonalTargets(n, fromIdx));
-      toSelect.value = String(toIdx);
-      tr.querySelector(".diagonal-input").value = feetToDisplay(length).toFixed(2);
-    });
-
-    rebuildCornerPlacementRows(); // the diagonal endpoints above were set directly, without a
-                                  // "change" event - the Corner placement list otherwise still
-                                  // reflects buildEdgeRows()'s original fan-from-A default
-    resolveAndRedraw();
-  }
-
   // ---- Boot this instance ------------------------------------------------------------
   buildTabs();
   updateUnitLabels();
   updateMirrorBtn();
   buildEdgeRows();
   goToStep(stepOrder[0]);
-  seedDiagonalGraphTestCase(); // TEMPORARY - see comment above; must run AFTER goToStep, which
-                                // clears the message area on every navigation (including this
-                                // first one) and would otherwise wipe the warning this sets.
 
   return {
     root,

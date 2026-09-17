@@ -651,14 +651,14 @@ Inside `createTool()`:
    angle), and the server would raise "Boundary does not close" or reconstruct something
    completely different, not merely mirrored.
 
-   **Temporary test default**, `seedDiagonalGraphTestCase()` (called once at the end of each
-   instance's boot, right after `goToStep(stepOrder[0])` - it must run *after*, not before,
-   since `goToStep` clears the message area on every navigation including the first one and
-   would otherwise wipe the warning this sets): pre-fills Metes & Bounds with the exact real
-   12-gon above instead of the default 4-sided square, so the fix is visible with zero manual
-   data entry. Safe to delete (the function and its one call site) once the fix has been
-   exercised enough to trust; it changes nothing about the solver itself, both tools' Metes &
-   Bounds are otherwise unaffected.
+   **The temporary test default has been removed.** `seedDiagonalGraphTestCase()` used to run
+   at the end of each instance's boot and pre-fill Metes & Bounds with the exact real 12-gon
+   above, so the fix was visible with zero data entry. It has served its purpose and is gone -
+   both tools now boot to the ordinary **200 ft square** again (4 sides x 200 ft, one seeded
+   diagonal of 282.84 ft). The 12-gon's measurements are still recorded above if this ever needs
+   reproducing by hand: lengths `[140, 61, 50, 88, 75, 87, 68, 67, 42, 54, 46, 84]` with
+   diagonals `L-B 184, L-C 200, L-D 214, L-E 154, E-K 128, E-J 144, E-I 130, I-F 165, F-H 140`.
+   Nothing about the solver changed when the seed was added or removed.
 2. **Road logic** - internal roads (straight or arced) with start/end references that can point
    at a plot side or another road. Calls `/compute-subsections`.
 3. **Plot logic** - per sub-section sizing params -> `/insert-plots`.
